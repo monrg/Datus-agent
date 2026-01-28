@@ -15,7 +15,13 @@ logger = get_logger(__name__)
 
 
 class ReferenceSqlStorage(BaseSubjectEmbeddingStore):
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(
+        self,
+        db_path: str,
+        embedding_model: EmbeddingModel,
+        backend: Optional[Any] = None,
+        subject_tree_store: Optional["SubjectTreeStore"] = None,
+    ):
         """Initialize the reference SQL store.
 
         Args:
@@ -26,6 +32,8 @@ class ReferenceSqlStorage(BaseSubjectEmbeddingStore):
             db_path=db_path,
             table_name="reference_sql",
             embedding_model=embedding_model,
+            backend=backend,
+            subject_tree_store=subject_tree_store,
             schema=pa.schema(
                 base_schema_columns()
                 + [

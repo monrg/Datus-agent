@@ -17,7 +17,13 @@ logger = get_logger(__name__)
 class ExtKnowledgeStore(BaseSubjectEmbeddingStore):
     """Store and manage external business knowledge in LanceDB."""
 
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(
+        self,
+        db_path: str,
+        embedding_model: EmbeddingModel,
+        backend: Optional[Any] = None,
+        subject_tree_store: Optional["SubjectTreeStore"] = None,
+    ):
         """Initialize the external knowledge store.
 
         Args:
@@ -28,6 +34,8 @@ class ExtKnowledgeStore(BaseSubjectEmbeddingStore):
             db_path=db_path,
             table_name="ext_knowledge",
             embedding_model=embedding_model,
+            backend=backend,
+            subject_tree_store=subject_tree_store,
             schema=pa.schema(
                 base_schema_columns()
                 + [

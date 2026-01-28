@@ -37,7 +37,7 @@ from sqlalchemy.sql.elements import ClauseElement
 from sqlalchemy.sql.schema import Index, UniqueConstraint
 from sqlalchemy.types import Boolean, Date, DateTime, Float, Integer, LargeBinary, String, Text
 
-from datus.storage.backends.interfaces import FilterExpr
+from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.storage.backends.relational.interfaces import (
     ColumnSpec,
     IndexSpec,
@@ -353,7 +353,14 @@ class SQLAlchemyBackend(RelationalBackend):
                 result = conn.execute(stmt)
                 inserted = getattr(result, "inserted_primary_key", None)
                 if inserted:
-                    return self._coerce_insert_id(inserted[0])
+                    insert_id = self._coerce_insert_id(inserted[0])
+                    if insert_id:
+                        return insert_id
+                    # Handle composite primary keys (e.g. namespace + id)
+                    for value in inserted[1:]:
+                        insert_id = self._coerce_insert_id(value)
+                        if insert_id:
+                            return insert_id
                 return self._coerce_insert_id(getattr(result, "lastrowid", None))
         except Exception as exc:
             raise self._connector.handle_exception(exc, sql=str(stmt), operation="insert") from exc

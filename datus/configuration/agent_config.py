@@ -243,6 +243,9 @@ class AgentConfig:
                 storage_config, openai_configs=self.models, default_openai_config=self.active_model()
             )
             self.workspace_root = storage_config.get("workspace_root")
+            self.storage_backends = storage_config.get("backends", {}) if isinstance(storage_config, dict) else {}
+        else:
+            self.storage_backends = {}
 
         self._init_dirs()
 
@@ -594,6 +597,88 @@ class AgentConfig:
                 message="Namespace is required, please run with --namespace <namespace>",
             )
         return rag_storage_path(self._current_namespace, self.rag_base_path)
+
+    def storage_backend_namespace(self, kind: str) -> Optional[str]:
+        """Return configured namespace for vector/relational storage backend."""
+        backends = self.storage_backends or {}
+        default_ns = backends.get("namespace")
+        if isinstance(backends.get(kind), dict):
+            return backends[kind].get("namespace") or default_ns
+        return default_ns
+
+    def storage_backend_db(self, kind: str) -> Optional[str]:
+        """Return configured db name for vector/relational storage backend."""
+        backends = self.storage_backends or {}
+        default_db = backends.get("db")
+        if isinstance(backends.get(kind), dict):
+            return backends[kind].get("db") or default_db
+        return default_db
+
+    def resolve_storage_db_config(self, kind: str) -> Optional[DbConfig]:
+        namespace = self.storage_backend_namespace(kind)
+        if not namespace:
+            return None
+        if namespace not in self.namespaces:
+            raise DatusException(
+                ErrorCode.COMMON_CONFIG_ERROR,
+                message=f"Storage backend namespace '{namespace}' not found in configuration.",
+            )
+        configs = self.namespaces[namespace]
+        if not configs:
+            raise DatusException(
+                ErrorCode.COMMON_CONFIG_ERROR,
+                message=f"No databases configured under namespace '{namespace}'.",
+            )
+        db_name = self.storage_backend_db(kind)
+        if db_name:
+            if db_name not in configs:
+                raise DatusException(
+                    ErrorCode.COMMON_CONFIG_ERROR,
+                    message=f"Database '{db_name}' not found in namespace '{namespace}'.",
+                )
+            return configs[db_name]
+        return next(iter(configs.values()))
+
+    def _build_postgres_connection_string(self, db_config: DbConfig) -> str:
+        from urllib.parse import quote_plus
+
+        username = quote_plus(db_config.username or "")
+        password = quote_plus(db_config.password or "")
+        host = db_config.host or "127.0.0.1"
+        port = db_config.port or 5432
+        database = db_config.database or "postgres"
+        sslmode = "prefer"
+        if db_config.extra and isinstance(db_config.extra, dict):
+            sslmode = db_config.extra.get("sslmode", sslmode)
+        return f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{database}?sslmode={sslmode}"
+
+    def relational_backend_options(self) -> Dict[str, Any]:
+        db_config = self.resolve_storage_db_config("relational")
+        if not db_config:
+            return {}
+        if db_config.type not in (DBType.POSTGRESQL, DBType.POSTGRES):
+            return {}
+        schema_name = db_config.schema or "public"
+        return {
+            "backend_type": "postgresql",
+            "connection_string": self._build_postgres_connection_string(db_config),
+            "namespace": self.current_namespace,
+            "schema": schema_name,
+        }
+
+    def vector_backend_options(self) -> Dict[str, Any]:
+        db_config = self.resolve_storage_db_config("vector")
+        if not db_config:
+            return {}
+        if db_config.type not in (DBType.POSTGRESQL, DBType.POSTGRES):
+            return {}
+        schema_name = db_config.schema or "public"
+        return {
+            "backend": "pgvector",
+            "connection_string": self._build_postgres_connection_string(db_config),
+            "namespace": self.current_namespace,
+            "schema": schema_name,
+        }
 
     def sub_agent_storage_path(self, sub_agent_name: str):
         return os.path.join(self.rag_base_path, "sub_agents", sub_agent_name)

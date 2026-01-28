@@ -51,11 +51,13 @@ class BaseMetadataStorage(BaseEmbeddingStore):
         embedding_model: EmbeddingModel,
         table_name: str,
         vector_source_name: str,
+        backend: Optional[Any] = None,
     ):
         super().__init__(
             db_path=db_path,
             table_name=table_name,
             embedding_model=embedding_model,
+            backend=backend,
             schema=pa.schema(
                 [
                     pa.field("identifier", pa.string()),
@@ -142,7 +144,7 @@ class BaseMetadataStorage(BaseEmbeddingStore):
 class SchemaStorage(BaseMetadataStorage):
     """Store and manage schema lineage data in LanceDB."""
 
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(self, db_path: str, embedding_model: EmbeddingModel, backend: Optional[Any] = None):
         """Initialize the schema store.
 
         Args:
@@ -153,6 +155,7 @@ class SchemaStorage(BaseMetadataStorage):
             table_name="schema_metadata",
             embedding_model=embedding_model,
             vector_source_name="definition",
+            backend=backend,
         )
         self.reranker = None
         # self.reranker = CrossEncoderReranker(
@@ -218,12 +221,13 @@ class SchemaStorage(BaseMetadataStorage):
 
 
 class SchemaValueStorage(BaseMetadataStorage):
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(self, db_path: str, embedding_model: EmbeddingModel, backend: Optional[Any] = None):
         super().__init__(
             db_path=db_path,
             embedding_model=embedding_model,
             table_name="schema_value",
             vector_source_name="sample_rows",
+            backend=backend,
         )
         self.reranker = None
         # self.reranker = CrossEncoderReranker(

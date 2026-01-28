@@ -19,11 +19,12 @@ logger = get_logger(__name__)
 class SemanticModelStorage(BaseEmbeddingStore):
     """Storage for field-level semantic objects (tables, columns) - excluding metrics."""
 
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(self, db_path: str, embedding_model: EmbeddingModel, backend: Optional[Any] = None):
         super().__init__(
             db_path=db_path,
             table_name="semantic_model",
             embedding_model=embedding_model,
+            backend=backend,
             schema=pa.schema(
                 [
                     # -- Identity & Basic Info --

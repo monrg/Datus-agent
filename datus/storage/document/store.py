@@ -3,7 +3,7 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 from functools import lru_cache
-from typing import List, Optional
+from typing import Any, List, Optional
 import pyarrow as pa
 
 from datus.storage import BaseEmbeddingStore
@@ -14,7 +14,7 @@ from datus.utils.exceptions import DatusException, ErrorCode
 class DocumentStore(BaseEmbeddingStore):
     """Store and manage document data in LanceDB."""
 
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(self, db_path: str, embedding_model: EmbeddingModel, backend: Optional[Any] = None):
         """Initialize the document store.
 
         Args:
@@ -24,6 +24,7 @@ class DocumentStore(BaseEmbeddingStore):
             db_path=db_path,
             table_name="document",
             embedding_model=embedding_model,
+            backend=backend,
             schema=pa.schema(
                 [
                     pa.field("title", pa.string()),

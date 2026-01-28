@@ -36,6 +36,7 @@ from datus.storage.semantic_model.semantic_model_init import (
 )
 from datus.storage.semantic_model.store import SemanticModelRAG
 from datus.storage.sub_agent_kb_bootstrap import SUPPORTED_COMPONENTS as SUB_AGENT_COMPONENTS
+from datus.storage.subject_tree.store import SubjectTreeStore
 from datus.storage.sub_agent_kb_bootstrap import SubAgentBootstrapper
 from datus.storage.storage_manager import StorageManager, build_default_artifact_stores
 from datus.tools.db_tools.db_manager import DBManager, db_manager_instance
@@ -365,7 +366,16 @@ class Agent:
         pool_size = 4 if not self.args.pool_size else self.args.pool_size
         dir_path = self.global_config.rag_storage_path()
         artifact_stores = build_default_artifact_stores(self.global_config.home)
-        storage_manager = StorageManager(dir_path, artifact_stores=artifact_stores)
+        from datus.storage.backends.vector.factory import get_default_backend
+
+        storage_backend = get_default_backend(dir_path, agent_config=self.global_config)
+        subject_tree_store = SubjectTreeStore(dir_path, **self.global_config.relational_backend_options())
+        storage_manager = StorageManager(
+            dir_path,
+            backend=storage_backend,
+            artifact_stores=artifact_stores,
+            subject_tree_store=subject_tree_store,
+        )
         # Parse subject_tree from command line if provided
         subject_tree = None
         if hasattr(self.args, "subject_tree") and self.args.subject_tree:

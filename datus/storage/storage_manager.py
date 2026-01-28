@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Protocol
 
-from datus.storage.backends.factory import get_default_backend
-from datus.storage.backends.interfaces import VectorBackend
+from datus.storage.backends.vector.factory import get_default_backend
+from datus.storage.backends.vector.interfaces import VectorBackend
+from datus.storage.subject_tree.store import SubjectTreeStore
 from datus.utils.loggings import get_logger
 from datus.utils.path_manager import DatusPathManager
 
@@ -53,10 +54,14 @@ class StorageManager:
         storage_path: str,
         backend: Optional[VectorBackend] = None,
         artifact_stores: Optional[Dict[str, ArtifactStore]] = None,
+        subject_tree_store: Optional["SubjectTreeStore"] = None,
+        subject_tree_components: Optional[tuple[str, ...]] = None,
     ):
         self.storage_path = storage_path
         self.backend = backend or get_default_backend(storage_path)
         self.artifact_stores = artifact_stores or {}
+        self.subject_tree_store = subject_tree_store
+        self.subject_tree_components = subject_tree_components or ("ext_knowledge",)
 
     def drop_component_tables(self, component: str) -> None:
         tables = COMPONENT_TABLES.get(component, ())
@@ -70,6 +75,8 @@ class StorageManager:
         self.drop_component_tables(component)
         if namespace and component in self.artifact_stores:
             self.artifact_stores[component].reset(namespace)
+        if self.subject_tree_store and component in self.subject_tree_components:
+            self.subject_tree_store.clear_nodes()
 
 
 def build_default_artifact_stores(datus_home: Optional[str] = None) -> Dict[str, ArtifactStore]:

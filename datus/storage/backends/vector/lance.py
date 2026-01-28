@@ -12,7 +12,7 @@ import pandas as pd
 import pyarrow as pa
 from lancedb.embeddings import EmbeddingFunctionConfig
 
-from datus.storage.backends.interfaces import (
+from datus.storage.backends.vector.interfaces import (
     BackendCapabilities,
     FilterCompiler,
     FilterExpr,
@@ -209,6 +209,7 @@ class LanceTable(VectorTable):
         where: Optional[FilterExpr] = None,
         select: Optional[Sequence[str]] = None,
         reranker: Optional[Any] = None,
+        vector: Optional[Sequence[float]] = None,
     ) -> pa.Table:
         where_clause = self._compile_where(where)
         query_builder = self._table.search(

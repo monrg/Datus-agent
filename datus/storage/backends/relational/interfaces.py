@@ -21,7 +21,7 @@ from typing import (
     Union,
 )
 
-from datus.storage.backends.interfaces import FilterExpr
+from datus.storage.backends.vector.interfaces import FilterExpr
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ class RelationalTable(Protocol):
     """Protocol for relational table operations.
 
     All methods that accept `where` parameter use FilterExpr from
-    datus.storage.backends.interfaces for consistency with vector backends.
+    datus.storage.backends.vector.interfaces for consistency with vector backends.
     """
 
     @property

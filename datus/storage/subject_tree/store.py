@@ -132,7 +132,16 @@ class SubjectTreeStore:
             raise
 
         created_node = self.get_node(node_id)
-        logger.info(f"Created node: {self.get_full_path(node_id)} (node_id={node_id})")
+        if not created_node:
+            # Fallback for backends that don't return inserted PKs (e.g., composite PKs)
+            created_node = self._find_child_by_name(parent_id, name)
+        if not created_node:
+            raise DatusException(
+                ErrorCode.DB_EXECUTION_ERROR,
+                message_args={"error_message": f"Failed to resolve created node '{name}' under parent {parent_id}"},
+            )
+        actual_id = created_node.get("node_id", node_id)
+        logger.info(f"Created node: {self.get_full_path(actual_id)} (node_id={actual_id})")
         return created_node
 
     def get_node(self, node_id: int) -> Optional[Dict[str, Any]]:
@@ -524,6 +533,12 @@ class SubjectTreeStore:
 
         return parent_id
 
+    def clear_nodes(self) -> int:
+        """Delete all subject nodes for the current namespace/storage."""
+        deleted = self.table.delete(where=None)
+        logger.info(f"Cleared subject_nodes (rows={deleted})")
+        return deleted
+
     def _find_child_by_name(self, parent_id: Optional[int], name: str) -> Optional[Dict[str, Any]]:
         """Find a child node by name under a specific parent."""
         if parent_id is None:
@@ -654,13 +669,22 @@ class BaseSubjectEmbeddingStore(BaseEmbeddingStore):
         schema: Optional[Union[pa.Schema, LanceModel]] = None,
         vector_source_name: str = "definition",
         vector_column_name: str = "vector",
+        backend: Optional[Any] = None,
+        subject_tree_store: Optional["SubjectTreeStore"] = None,
     ):
         super().__init__(
-            db_path, table_name, embedding_model, on_duplicate_columns, schema, vector_source_name, vector_column_name
+            db_path,
+            table_name,
+            embedding_model,
+            on_duplicate_columns,
+            schema,
+            vector_source_name,
+            vector_column_name,
+            backend=backend,
         )
 
         # Initialize SubjectTreeStore for managing subject hierarchy
-        self.subject_tree = SubjectTreeStore(db_path)
+        self.subject_tree = subject_tree_store or SubjectTreeStore(db_path)
 
     def batch_store(
         self,

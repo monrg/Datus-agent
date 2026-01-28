@@ -15,6 +15,10 @@ from .interfaces import (
     VectorBackend,
     VectorTable,
 )
+from .lance import LanceBackend
+from .registry import register_vector_backend
+
+register_vector_backend("lancedb", LanceBackend)
 
 __all__ = [
     # Vector backend types
@@ -29,4 +33,6 @@ __all__ = [
     "TableSpec",
     "VectorBackend",
     "VectorTable",
+    "register_vector_backend",
+    "LanceBackend",
 ]

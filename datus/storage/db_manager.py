@@ -84,6 +84,11 @@ class DBManager:
         # Get backend class
         backend_class = _BACKEND_REGISTRY.get(backend_type)
         if backend_class is None:
+            from datus.storage.backends.plugin_loader import try_load_storage_plugin
+
+            try_load_storage_plugin(backend_type)
+            backend_class = _BACKEND_REGISTRY.get(backend_type)
+        if backend_class is None:
             available = ", ".join(_BACKEND_REGISTRY.keys())
             raise ValueError(
                 f"Unknown backend type: {backend_type}. Available: {available}"

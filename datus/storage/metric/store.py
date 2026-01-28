@@ -16,11 +16,19 @@ logger = get_logger(__name__)
 
 
 class MetricStorage(BaseSubjectEmbeddingStore):
-    def __init__(self, db_path: str, embedding_model: EmbeddingModel):
+    def __init__(
+        self,
+        db_path: str,
+        embedding_model: EmbeddingModel,
+        backend: Optional[Any] = None,
+        subject_tree_store: Optional["SubjectTreeStore"] = None,
+    ):
         super().__init__(
             db_path=db_path,
             table_name="metrics",
             embedding_model=embedding_model,
+            backend=backend,
+            subject_tree_store=subject_tree_store,
             schema=pa.schema(
                 base_schema_columns()  # Provides: name, subject_id, created_at
                 + [

@@ -124,6 +124,7 @@ class VectorTable(Protocol):
         where: Optional[FilterExpr] = None,
         select: Optional[Sequence[str]] = None,
         reranker: Optional[Any] = None,
+        vector: Optional[Sequence[float]] = None,
     ) -> pa.Table:
         """Hybrid search (vector + lexical) when supported."""
 

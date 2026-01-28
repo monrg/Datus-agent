@@ -11,8 +11,8 @@ from lancedb.pydantic import LanceModel
 from lancedb.rerankers import Reranker
 from pydantic import Field
 
-from datus.storage.backends.factory import get_default_backend
-from datus.storage.backends.interfaces import TableSpec, VectorBackend, VectorTable
+from datus.storage.backends.vector.factory import get_default_backend
+from datus.storage.backends.vector.interfaces import TableSpec, VectorBackend, VectorTable
 from datus.storage.embedding_models import EmbeddingModel
 from datus.storage.lancedb_conditions import WhereExpr
 from datus.utils.exceptions import DatusException, ErrorCode
@@ -237,6 +237,7 @@ class BaseEmbeddingStore(StorageBase):
 
         try:
             with self._write_lock:
+                data = self._with_embeddings(data)
                 if len(data) <= self.batch_size:
                     self.table.add(data)
                     return
@@ -252,6 +253,7 @@ class BaseEmbeddingStore(StorageBase):
         self._ensure_table_ready()
         try:
             with self._write_lock:
+                data = self._with_embeddings(data)
                 self.table.add(data)
         except Exception as e:
             raise DatusException(ErrorCode.STORAGE_SAVE_FAILED, message_args={"error_message": str(e)}) from e
@@ -284,6 +286,7 @@ class BaseEmbeddingStore(StorageBase):
 
         try:
             with self._write_lock:
+                data = self._with_embeddings(data)
                 if len(data) <= self.batch_size:
                     self.table.upsert(data, on_column)
                     return
@@ -305,7 +308,8 @@ class BaseEmbeddingStore(StorageBase):
         # Ensure table is ready before searching
         self._ensure_table_ready()
 
-        if reranker and self.backend.caps.hybrid_search:
+        use_hybrid = self.backend.caps.hybrid_search and (reranker is not None or not self.backend.caps.native_embedding)
+        if use_hybrid:
             search_result = self._search_hybrid(query_txt, reranker, select_fields, top_n, where)
         else:
             search_result = self._search_vector(query_txt, select_fields, top_n, where)
@@ -316,7 +320,7 @@ class BaseEmbeddingStore(StorageBase):
     def _search_hybrid(
         self,
         query_txt: str,
-        reranker: Reranker,
+        reranker: Optional[Reranker],
         select_fields: Optional[List[str]] = None,
         top_n: Optional[int] = None,
         where: WhereExpr = None,
@@ -324,8 +328,16 @@ class BaseEmbeddingStore(StorageBase):
         try:
             if not top_n:
                 top_n = self.table.count(where)
+            query_vector = None
+            if not self.backend.caps.native_embedding:
+                query_vector = self._embed_query(query_txt)
             return self.table.search_hybrid(
-                text=query_txt, top_n=top_n, where=where, select=select_fields, reranker=reranker
+                text=query_txt,
+                top_n=top_n,
+                where=where,
+                select=select_fields,
+                reranker=reranker,
+                vector=query_vector,
             )
         except Exception as e:
             logger.warning(f"Failed to search hybrid: {str(e)}, use vector search instead")
@@ -393,3 +405,36 @@ class BaseEmbeddingStore(StorageBase):
     def _embed_query(self, text: str) -> List[float]:
         embeddings = self.model.model.generate_embeddings([text])
         return embeddings[0] if embeddings else []
+
+    def _with_embeddings(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure vector column is populated for backends without native embedding."""
+        if not rows or self.backend.caps.native_embedding:
+            return rows
+
+        to_embed: List[str] = []
+        indices: List[int] = []
+        for idx, row in enumerate(rows):
+            if row.get(self.vector_column_name) is None:
+                text_value = row.get(self.vector_source_name)
+                if text_value is None:
+                    text_value = ""
+                to_embed.append(str(text_value))
+                indices.append(idx)
+
+        if not to_embed:
+            return rows
+
+        embeddings = self.model.model.generate_embeddings(to_embed)
+        if len(embeddings) != len(to_embed):
+            raise DatusException(
+                ErrorCode.STORAGE_SAVE_FAILED,
+                message_args={
+                    "error_message": (
+                        f"Embedding count mismatch: expected {len(to_embed)} got {len(embeddings)}"
+                    )
+                },
+            )
+
+        for idx, vector in zip(indices, embeddings):
+            rows[idx] = {**rows[idx], self.vector_column_name: vector}
+        return rows

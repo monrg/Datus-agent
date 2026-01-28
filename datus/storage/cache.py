@@ -18,6 +18,8 @@ from datus.storage.reference_sql import ReferenceSqlStorage
 from datus.storage.schema_metadata import SchemaStorage
 from datus.storage.schema_metadata.store import SchemaValueStorage
 from datus.storage.semantic_model.store import SemanticModelStorage
+from datus.storage.subject_tree.store import SubjectTreeStore
+from datus.storage.backends.vector.factory import get_default_backend
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
@@ -37,13 +39,27 @@ class StorageCacheHolder[T: BaseEmbeddingStore]:
         agent_config: AgentConfig,
         storage_name: str,
         check_scope_attr: str,
+        extra_kwargs_provider: Optional[Callable[[Optional[str]], dict]] = None,
     ):
         self.storage_factory = storage_factory
         self.storage_name = storage_name
         self._agent_config = agent_config
         self.check_scope_attr = check_scope_attr
+        self._extra_kwargs_provider = extra_kwargs_provider
+        self._instances = {}
 
     def storage_instance(self, sub_agent_name: Optional[str] = None) -> T:
+        extra_kwargs = {}
+        if self._extra_kwargs_provider:
+            extra_kwargs.update(self._extra_kwargs_provider(sub_agent_name))
+        backend = get_default_backend(
+            self._agent_config.rag_storage_path()
+            if not sub_agent_name
+            else self._agent_config.sub_agent_storage_path(sub_agent_name),
+            agent_config=self._agent_config,
+        )
+        extra_kwargs.setdefault("backend", backend)
+
         if sub_agent_name and (config := self._agent_config.sub_agent_config(sub_agent_name)):
             sub_agent_config = SubAgentConfig.model_validate(config)
             if sub_agent_config.has_scoped_context_by(self.check_scope_attr) and getattr(
@@ -55,10 +71,25 @@ class StorageCacheHolder[T: BaseEmbeddingStore]:
                         f"so use {self._agent_config.sub_agent_storage_path(sub_agent_name)} for LanceDB"
                     )
                 )
-                return self.storage_factory(
-                    self._agent_config.sub_agent_storage_path(sub_agent_name), get_embedding_model(self.storage_name)
-                )
-        return _cached_storage(self.storage_factory, self._agent_config.rag_storage_path(), self.storage_name)
+                storage_path = self._agent_config.sub_agent_storage_path(sub_agent_name)
+                return self._get_or_create(storage_path, extra_kwargs)
+        return self._get_or_create(self._agent_config.rag_storage_path(), extra_kwargs)
+
+    def _get_or_create(self, storage_path: str, extra_kwargs: dict) -> T:
+        cache_key = (storage_path, self.storage_name, getattr(extra_kwargs.get("backend"), "name", "default"))
+        if cache_key in self._instances:
+            return self._instances[cache_key]
+        instance = self.storage_factory(storage_path, get_embedding_model(self.storage_name), **extra_kwargs)
+        self._instances[cache_key] = instance
+        return instance
+
+    def invalidate_path(self, storage_path: str) -> None:
+        keys = [key for key in self._instances if key[0] == storage_path]
+        for key in keys:
+            self._instances.pop(key, None)
+
+    def clear(self) -> None:
+        self._instances.clear()
 
 
 class StorageCache:
@@ -76,34 +107,97 @@ class StorageCache:
         self._agent_config = agent_config
         self._schema_holder = StorageCacheHolder(SchemaStorage, agent_config, "database", "tables")
         self._sample_data_holder = StorageCacheHolder(SchemaValueStorage, agent_config, "database", "tables")
-        self._metric_holder = StorageCacheHolder(MetricStorage, agent_config, "metric", "metrics")
         self._semantic_holder = StorageCacheHolder(SemanticModelStorage, agent_config, "metric", "semantic_models")
-        self._reference_sql_holder = StorageCacheHolder(ReferenceSqlStorage, agent_config, "metric", "sqls")
         self._document_holder = StorageCacheHolder(DocumentStore, agent_config, "document", "")
-        self._ext_knowledge_holder = StorageCacheHolder(ExtKnowledgeStore, agent_config, "document", "ext_knowledge")
         self._subject_tree_store = None
+
+        def subject_tree_kwargs(_: Optional[str]) -> dict:
+            return {"subject_tree_store": self.subject_tree_store()}
+
+        self._metric_holder = StorageCacheHolder(
+            MetricStorage, agent_config, "metric", "metrics", extra_kwargs_provider=subject_tree_kwargs
+        )
+        self._reference_sql_holder = StorageCacheHolder(
+            ReferenceSqlStorage, agent_config, "metric", "sqls", extra_kwargs_provider=subject_tree_kwargs
+        )
+        self._ext_knowledge_holder = StorageCacheHolder(
+            ExtKnowledgeStore, agent_config, "document", "ext_knowledge", extra_kwargs_provider=subject_tree_kwargs
+        )
 
     def schema_storage(self, sub_agent_name: Optional[str] = None) -> SchemaStorage:
         return self._schema_holder.storage_instance(sub_agent_name)
 
+    def schema_rag(self, sub_agent_name: Optional[str] = None) -> SchemaStorage:
+        return self.schema_storage(sub_agent_name)
+
     def schema_value_storage(self, sub_agent_name: Optional[str] = None) -> SchemaValueStorage:
         return self._sample_data_holder.storage_instance(sub_agent_name)
+
+    def schema_value_rag(self, sub_agent_name: Optional[str] = None) -> SchemaValueStorage:
+        return self.schema_value_storage(sub_agent_name)
 
     def metric_storage(self, sub_agent_name: Optional[str] = None) -> MetricStorage:
         """Access dedicated MetricStorage for metrics only."""
         return self._metric_holder.storage_instance(sub_agent_name)
 
+    def metrics_rag(self, sub_agent_name: Optional[str] = None) -> MetricStorage:
+        return self.metric_storage(sub_agent_name)
+
     def semantic_storage(self, sub_agent_name: Optional[str] = None) -> SemanticModelStorage:
         return self._semantic_holder.storage_instance(sub_agent_name)
+
+    def semantic_rag(self, sub_agent_name: Optional[str] = None) -> SemanticModelStorage:
+        return self.semantic_storage(sub_agent_name)
 
     def reference_sql_storage(self, sub_agent_name: Optional[str] = None) -> ReferenceSqlStorage:
         return self._reference_sql_holder.storage_instance(sub_agent_name)
 
+    def reference_sql_rag(self, sub_agent_name: Optional[str] = None) -> ReferenceSqlStorage:
+        return self.reference_sql_storage(sub_agent_name)
+
     def document_storage(self, sub_agent_name: Optional[str] = None) -> DocumentStore:
         return self._document_holder.storage_instance(sub_agent_name)
 
+    def document_rag(self, sub_agent_name: Optional[str] = None) -> DocumentStore:
+        return self.document_storage(sub_agent_name)
+
     def ext_knowledge_storage(self, sub_agent_name: Optional[str] = None) -> ExtKnowledgeStore:
         return self._ext_knowledge_holder.storage_instance(sub_agent_name)
+
+    def ext_knowledge_rag(self, sub_agent_name: Optional[str] = None) -> ExtKnowledgeStore:
+        return self.ext_knowledge_storage(sub_agent_name)
+
+    def subject_tree_store(self) -> SubjectTreeStore:
+        if self._subject_tree_store is None:
+            backend_args = self._agent_config.relational_backend_options()
+            self._subject_tree_store = SubjectTreeStore(self._agent_config.rag_storage_path(), **backend_args)
+        return self._subject_tree_store
+
+    def invalidate(self, sub_agent_name: Optional[str] = None) -> None:
+        if sub_agent_name:
+            storage_path = self._agent_config.sub_agent_storage_path(sub_agent_name)
+            for holder in (
+                self._schema_holder,
+                self._sample_data_holder,
+                self._semantic_holder,
+                self._document_holder,
+                self._metric_holder,
+                self._reference_sql_holder,
+                self._ext_knowledge_holder,
+            ):
+                holder.invalidate_path(storage_path)
+            return
+        for holder in (
+            self._schema_holder,
+            self._sample_data_holder,
+            self._semantic_holder,
+            self._document_holder,
+            self._metric_holder,
+            self._reference_sql_holder,
+            self._ext_knowledge_holder,
+        ):
+            holder.clear()
+        self._subject_tree_store = None
 
 
 _CACHE_INSTANCE = None

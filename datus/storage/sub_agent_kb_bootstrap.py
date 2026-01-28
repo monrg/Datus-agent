@@ -191,7 +191,10 @@ class SubAgentBootstrapper:
             self._clear_component(component)
 
     def _clear_component(self, component: str):
-        manager = StorageManager(self.storage_path)
+        from datus.storage.backends.vector.factory import get_default_backend
+
+        storage_backend = get_default_backend(self.storage_path, agent_config=self.agent_config)
+        manager = StorageManager(self.storage_path, backend=storage_backend)
         manager.drop_component_tables(component)
 
     def _count_rows(self, storage, condition: Optional[Node]) -> int:

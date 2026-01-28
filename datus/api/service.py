@@ -61,7 +61,8 @@ class DatusAPIService:
 
             # Initialize task store
             task_db_path = os.path.join(self.agent_config.rag_base_path, "task")
-            self.task_store = TaskStore(task_db_path)
+            backend_args = self.agent_config.relational_backend_options()
+            self.task_store = TaskStore(task_db_path, **backend_args)
             logger.info("Task store initialized successfully")
 
             # Clean up old tasks on startup
