@@ -37,13 +37,13 @@ from datus.storage.semantic_model.semantic_model_init import (
 from datus.storage.semantic_model.store import SemanticModelRAG
 from datus.storage.sub_agent_kb_bootstrap import SUPPORTED_COMPONENTS as SUB_AGENT_COMPONENTS
 from datus.storage.sub_agent_kb_bootstrap import SubAgentBootstrapper
+from datus.storage.storage_manager import StorageManager, build_default_artifact_stores
 from datus.tools.db_tools.db_manager import DBManager, db_manager_instance
 from datus.utils.benchmark_utils import load_benchmark_tasks
 from datus.utils.constants import SYS_SUB_AGENTS
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.json_utils import to_str
 from datus.utils.loggings import get_logger
-from datus.utils.path_manager import get_path_manager
 from datus.utils.time_utils import format_duration_human
 
 logger = get_logger(__name__)
@@ -364,7 +364,8 @@ class Agent:
         benchmark_platform = self.args.benchmark
         pool_size = 4 if not self.args.pool_size else self.args.pool_size
         dir_path = self.global_config.rag_storage_path()
-
+        artifact_stores = build_default_artifact_stores(self.global_config.home)
+        storage_manager = StorageManager(dir_path, artifact_stores=artifact_stores)
         # Parse subject_tree from command line if provided
         subject_tree = None
         if hasattr(self.args, "subject_tree") and self.args.subject_tree:
@@ -393,14 +394,9 @@ class Agent:
 
                 if kb_update_strategy == "overwrite":
                     self.global_config.save_storage_config("database")
-                    schema_metadata_path = os.path.join(dir_path, "schema_metadata.lance")
-                    if os.path.exists(schema_metadata_path):
-                        shutil.rmtree(schema_metadata_path)
-                        logger.info(f"Deleted existing directory {schema_metadata_path}")
-                    schema_value_path = os.path.join(dir_path, "schema_value.lance")
-                    if os.path.exists(schema_value_path):
-                        shutil.rmtree(schema_value_path)
-                        logger.info(f"Deleted existing directory {schema_value_path}")
+                    storage_manager.reset_component(
+                        "metadata", kb_update_strategy, namespace=self.global_config.current_namespace
+                    )
                 else:
                     self.global_config.check_init_storage_config("database")
                 self.metadata_store = SchemaWithValueRAG(self.global_config)
@@ -448,27 +444,20 @@ class Agent:
                         ErrorCode.COMMON_VALIDATION_FAILED, f"Unsupported benchmark platform: {benchmark_platform}"
                     )
 
+                self._refresh_scoped_agents("metadata", kb_update_strategy)
                 result = {
                     "status": "success",
                     "message": f"metadata bootstrap completed, "
                     f"schema_size={self.metadata_store.get_schema_size()}, "
                     f"value_size={self.metadata_store.get_value_size()}",
                 }
-                self._refresh_scoped_agents("metadata", kb_update_strategy)
                 return result
 
             elif component == "semantic_model":
-                semantic_model_path = os.path.join(dir_path, "semantic_model.lance")
                 if kb_update_strategy == "overwrite":
-                    if os.path.exists(semantic_model_path):
-                        shutil.rmtree(semantic_model_path)
-                        logger.info(f"Deleted existing directory {semantic_model_path}")
-                    # Also clear semantic_models/{namespace} directory (YAML files)
-                    path_manager = get_path_manager(datus_home=self.global_config.home)
-                    semantic_yaml_dir = path_manager.semantic_model_path(self.global_config.current_namespace)
-                    if semantic_yaml_dir.exists():
-                        shutil.rmtree(semantic_yaml_dir)
-                        logger.info(f"Deleted existing semantic YAML directory {semantic_yaml_dir}")
+                    storage_manager.reset_component(
+                        "semantic_model", kb_update_strategy, namespace=self.global_config.current_namespace
+                    )
                     self.global_config.save_storage_config("semantic_model")
                 else:
                     self.global_config.check_init_storage_config("semantic_model")
@@ -502,17 +491,10 @@ class Agent:
                 return result
 
             elif component == "metrics":
-                metrics_path = os.path.join(dir_path, "metrics.lance")
                 if kb_update_strategy == "overwrite":
-                    if os.path.exists(metrics_path):
-                        shutil.rmtree(metrics_path)
-                        logger.info(f"Deleted existing directory {metrics_path}")
-                    # Also clear semantic_models/{namespace} directory (YAML files)
-                    path_manager = get_path_manager(datus_home=self.global_config.home)
-                    semantic_yaml_dir = path_manager.semantic_model_path(self.global_config.current_namespace)
-                    if semantic_yaml_dir.exists():
-                        shutil.rmtree(semantic_yaml_dir)
-                        logger.info(f"Deleted existing semantic YAML directory {semantic_yaml_dir}")
+                    storage_manager.reset_component(
+                        "metrics", kb_update_strategy, namespace=self.global_config.current_namespace
+                    )
                     self.global_config.save_storage_config("metric")  # Keep compatibility
                 else:
                     self.global_config.check_init_storage_config("metric")
@@ -554,17 +536,11 @@ class Agent:
                 self.storage_modules["document_store"] = document_store(self.global_config.rag_storage_path())
                 # self.global_config.check_init_storage_config("document")
             elif component == "ext_knowledge":
-                ext_knowledge_path = os.path.join(dir_path, "ext_knowledge.lance")
+                # todo refactor ext_knowledge store init
                 if kb_update_strategy == "overwrite":
-                    if os.path.exists(ext_knowledge_path):
-                        shutil.rmtree(ext_knowledge_path)
-                        logger.info(f"Deleted existing directory {ext_knowledge_path}")
-                    # Also clear ext_knowledge/{namespace} directory
-                    path_manager = get_path_manager(datus_home=self.global_config.home)
-                    ext_knowledge_dir = path_manager.ext_knowledge_path(self.global_config.current_namespace)
-                    if ext_knowledge_dir.exists():
-                        shutil.rmtree(ext_knowledge_dir)
-                        logger.info(f"Deleted existing ext_knowledge directory {ext_knowledge_dir}")
+                    storage_manager.reset_component(
+                        "ext_knowledge", kb_update_strategy, namespace=self.global_config.current_namespace
+                    )
                     self.global_config.save_storage_config("ext_knowledge")
                 else:
                     self.global_config.check_init_storage_config("ext_knowledge")
@@ -591,17 +567,10 @@ class Agent:
                     f"knowledge_size={self.ext_knowledge_rag.store.table_size()}",
                 }
             elif component == "reference_sql":
-                reference_sql_path = os.path.join(dir_path, "reference_sql.lance")
                 if kb_update_strategy == "overwrite":
-                    if os.path.exists(reference_sql_path):
-                        shutil.rmtree(reference_sql_path)
-                        logger.info(f"Deleted existing directory {reference_sql_path}")
-                    # Also clear sql_summaries/{namespace} directory (YAML files)
-                    path_manager = get_path_manager(datus_home=self.global_config.home)
-                    sql_summary_dir = path_manager.sql_summary_path(self.global_config.current_namespace)
-                    if sql_summary_dir.exists():
-                        shutil.rmtree(sql_summary_dir)
-                        logger.info(f"Deleted existing SQL summary directory {sql_summary_dir}")
+                    storage_manager.reset_component(
+                        "reference_sql", kb_update_strategy, namespace=self.global_config.current_namespace
+                    )
                     self.global_config.save_storage_config("reference_sql")
                 else:
                     self.global_config.check_init_storage_config("reference_sql")

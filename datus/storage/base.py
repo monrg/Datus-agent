@@ -2,23 +2,19 @@
 # Licensed under the Apache License, Version 2.0.
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
-import time
 from datetime import datetime
 from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
-import lancedb
-import pandas as pd
 import pyarrow as pa
-from lancedb.embeddings import EmbeddingFunctionConfig
 from lancedb.pydantic import LanceModel
-from lancedb.query import LanceQueryBuilder
 from lancedb.rerankers import Reranker
-from lancedb.table import Table
 from pydantic import Field
 
+from datus.storage.backends.factory import get_default_backend
+from datus.storage.backends.interfaces import TableSpec, VectorBackend, VectorTable
 from datus.storage.embedding_models import EmbeddingModel
-from datus.storage.lancedb_conditions import WhereExpr, build_where
+from datus.storage.lancedb_conditions import WhereExpr
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger
 
@@ -26,44 +22,17 @@ logger = get_logger(__name__)
 
 
 class StorageBase:
-    """Base class for all storage components using LanceDB."""
+    """Base class for all storage components using vector backends."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, backend: Optional[VectorBackend] = None):
         """Initialize the storage base.
 
         Args:
-            db_path: Path to the LanceDB database directory
+            db_path: Path to the vector database directory
+            backend: Optional vector backend instance
         """
         self.db_path = db_path
-        self.db = lancedb.connect(db_path)
-        # self._ensure_tables()
-
-    def _ensure_tables(self):
-        """Ensure all required tables exist in LanceDB."""
-        self._ensure_success_story_table()
-
-    def _ensure_success_story_table(self):
-        """Ensure the success story table exists in LanceDB."""
-        try:
-            if "success_story" not in self.db.table_names():
-                # Create table schema using PyArrow
-                schema = pa.schema(
-                    [
-                        pa.field("sql", pa.string()),
-                        pa.field("user_name", pa.string()),
-                        pa.field("type", pa.string()),
-                        pa.field("bi_tool", pa.string()),
-                        pa.field("description", pa.string()),
-                        pa.field("created_at", pa.string()),
-                        pa.field("embedding", pa.list_(pa.float64(), list_size=384)),
-                    ]
-                )
-                self.db.create_table("success_story", schema=schema)
-        except Exception as e:
-            raise DatusException(
-                ErrorCode.STORAGE_TABLE_OPERATION_FAILED,
-                message_args={"operation": "create_table", "table_name": "success_story", "error_message": str(e)},
-            ) from e
+        self.backend = backend or get_default_backend(db_path)
 
     def _get_current_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
@@ -92,8 +61,9 @@ class BaseEmbeddingStore(StorageBase):
         schema: Optional[Union[pa.Schema, LanceModel]] = None,
         vector_source_name: str = "definition",
         vector_column_name: str = "vector",
+        backend: Optional[VectorBackend] = None,
     ):
-        super().__init__(db_path)
+        super().__init__(db_path, backend=backend)
         self.model = embedding_model
         self.batch_size = embedding_model.batch_size
         self.table_name = table_name
@@ -102,7 +72,7 @@ class BaseEmbeddingStore(StorageBase):
         self.on_duplicate_columns = on_duplicate_columns
         self._schema = schema
         # Delay table initialization until first use
-        self.table: Optional[Table] = None
+        self.table: Optional[VectorTable] = None
         self._table_initialized = False
         self._table_lock = Lock()
         self._write_lock = Lock()
@@ -127,17 +97,7 @@ class BaseEmbeddingStore(StorageBase):
         self, where: WhereExpr = None, select_fields: Optional[List[str]] = None, limit: Optional[int] = None
     ) -> pa.Table:
         self._ensure_table_ready()
-        where_clause = build_where(where)
-        query_builder = self.table.search()
-        if where_clause:
-            query_builder = query_builder.where(where_clause)
-        if select_fields:
-            query_builder = query_builder.select(select_fields)
-        if limit:
-            row_limit = limit
-        else:
-            row_limit = self.table.count_rows(where_clause) if where_clause else self.table.count_rows()
-        result = query_builder.limit(row_limit).to_arrow()
+        result = self.table.search_all(where=where, select=select_fields, limit=limit)
         if self.vector_column_name in result.column_names:
             result = result.drop([self.vector_column_name])
         return result
@@ -166,27 +126,22 @@ class BaseEmbeddingStore(StorageBase):
             ) from e
 
     def _ensure_table(self, schema: Optional[Union[pa.Schema, LanceModel]] = None):
-        if self.table_name in self.db.table_names(limit=100):
-            self.table = self.db.open_table(self.table_name)
-        else:
-            try:
-                self.table: Table = self.db.create_table(
-                    self.table_name,
-                    schema=schema,
-                    embedding_functions=[
-                        EmbeddingFunctionConfig(
-                            vector_column=self.vector_column_name,
-                            source_column=self.vector_source_name,
-                            function=self.model.model,
-                        )
-                    ],
-                    exist_ok=True,
-                )
-            except Exception as e:
-                raise DatusException(
-                    ErrorCode.STORAGE_TABLE_OPERATION_FAILED,
-                    message_args={"operation": "create_table", "table_name": self.table_name, "error_message": str(e)},
-                ) from e
+        try:
+            embedding_function = self.model.model if self.backend.caps.native_embedding else None
+            spec = TableSpec(
+                name=self.table_name,
+                schema=schema,
+                vector_column=self.vector_column_name,
+                vector_dim=self.model.dim_size,
+                text_source=self.vector_source_name,
+                embedding_function=embedding_function,
+            )
+            self.table = self.backend.ensure_table(spec)
+        except Exception as e:
+            raise DatusException(
+                ErrorCode.STORAGE_TABLE_OPERATION_FAILED,
+                message_args={"operation": "create_table", "table_name": self.table_name, "error_message": str(e)},
+            ) from e
 
     def create_vector_index(
         self,
@@ -203,7 +158,7 @@ class BaseEmbeddingStore(StorageBase):
         """
         self._ensure_table_ready()
         try:
-            row_count = self.table.count_rows()
+            row_count = self.table.count()
             logger.debug(f"Creating vector index for {self.table_name} with {row_count} rows")
 
             # Determine index type based on dataset size
@@ -248,7 +203,7 @@ class BaseEmbeddingStore(StorageBase):
             if accelerator and accelerator == "cuda" or accelerator == "mps":
                 index_params["accelerator"] = accelerator
 
-            self.table.create_index(**index_params)
+            self.table.create_vector_index(**index_params)
             logger.debug(f"Successfully created {index_type} index for {self.table_name}")
 
         except Exception as e:
@@ -258,7 +213,8 @@ class BaseEmbeddingStore(StorageBase):
     def create_fts_index(self, field_names: Union[str, List[str]]):
         self._ensure_table_ready()
         try:
-            self.table.create_fts_index(field_names=field_names, replace=True)
+            fields = field_names if isinstance(field_names, list) else [field_names]
+            self.table.create_fts_index(fields=fields, replace=True)
         except Exception as e:
             # Does not affect usage, so no exception is thrown.
             logger.warning(f"Failed to create fts index for {self.table_name} table: {str(e)}")
@@ -282,12 +238,12 @@ class BaseEmbeddingStore(StorageBase):
         try:
             with self._write_lock:
                 if len(data) <= self.batch_size:
-                    self._add_with_retry(pd.DataFrame(data))
+                    self.table.add(data)
                     return
                 # split the data into batches and store them
                 for i in range(0, len(data), self.batch_size):
                     batch = data[i : i + self.batch_size]
-                    self._add_with_retry(pd.DataFrame(batch))
+                    self.table.add(batch)
         except Exception as e:
             raise DatusException(ErrorCode.STORAGE_SAVE_FAILED, message_args={"error_message": str(e)}) from e
 
@@ -296,7 +252,7 @@ class BaseEmbeddingStore(StorageBase):
         self._ensure_table_ready()
         try:
             with self._write_lock:
-                self._add_with_retry(pd.DataFrame(data))
+                self.table.add(data)
         except Exception as e:
             raise DatusException(ErrorCode.STORAGE_SAVE_FAILED, message_args={"error_message": str(e)}) from e
 
@@ -314,93 +270,29 @@ class BaseEmbeddingStore(StorageBase):
 
         # Deduplicate input data by on_column, keeping the last occurrence
         # This prevents duplicates when the same id appears multiple times in the input batch
-        df = pd.DataFrame(data)
-        if on_column in df.columns:
-            original_count = len(df)
-            df = df.drop_duplicates(subset=[on_column], keep="last")
-            if len(df) < original_count:
+        # Deduplicate input data by on_column, keeping the last occurrence
+        if data and on_column in data[0]:
+            seen = {}
+            for row in data:
+                key = row.get(on_column)
+                seen[key] = row
+            if len(seen) < len(data):
                 logger.debug(
-                    f"Deduplicated {original_count - len(df)} records with duplicate '{on_column}' before upsert"
+                    f"Deduplicated {len(data) - len(seen)} records with duplicate '{on_column}' before upsert"
                 )
-        data = df.to_dict("records")
+            data = list(seen.values())
 
         try:
             with self._write_lock:
                 if len(data) <= self.batch_size:
-                    self._upsert_with_retry(pd.DataFrame(data), on_column)
+                    self.table.upsert(data, on_column)
                     return
                 # Split the data into batches and upsert them
                 for i in range(0, len(data), self.batch_size):
                     batch = data[i : i + self.batch_size]
-                    self._upsert_with_retry(pd.DataFrame(batch), on_column)
+                    self.table.upsert(batch, on_column)
         except Exception as e:
             raise DatusException(ErrorCode.STORAGE_SAVE_FAILED, message_args={"error_message": str(e)}) from e
-
-    def _upsert_with_retry(
-        self, frame: pd.DataFrame, on_column: str, max_attempts: int = 3, initial_delay: float = 0.05
-    ) -> None:
-        """Upsert a DataFrame into LanceDB with simple retry/backoff on commit conflicts."""
-        if self.table is None:
-            raise DatusException(
-                ErrorCode.STORAGE_SAVE_FAILED,
-                message_args={"error_message": "Lance table is not initialized"},
-            )
-
-        last_error: Exception | None = None
-        for attempt in range(max_attempts):
-            try:
-                self.table.merge_insert(on_column).when_matched_update_all().when_not_matched_insert_all().execute(
-                    frame
-                )
-                return
-            except Exception as err:
-                error_message = str(err)
-                if "Commit conflict" not in error_message:
-                    raise err
-
-                last_error = err
-                delay = initial_delay * (attempt + 1)
-                logger.warning(
-                    f"Commit conflict detected when upserting to LanceDB table '{self.table_name}' "
-                    f"(attempt {attempt + 1}/{max_attempts}). Retrying after {delay:.2f}s."
-                )
-                # Refresh table handle so subsequent attempts see the latest version
-                self.table = self.db.open_table(self.table_name)
-                time.sleep(delay)
-
-        assert last_error is not None  # for type checkers
-        raise last_error
-
-    def _add_with_retry(self, frame: pd.DataFrame, max_attempts: int = 3, initial_delay: float = 0.05) -> None:
-        """Insert a DataFrame into LanceDB with simple retry/backoff on commit conflicts."""
-        if self.table is None:
-            raise DatusException(
-                ErrorCode.STORAGE_SAVE_FAILED,
-                message_args={"error_message": "Lance table is not initialized"},
-            )
-
-        last_error: Exception | None = None
-        for attempt in range(max_attempts):
-            try:
-                self.table.add(frame)
-                return
-            except Exception as err:
-                error_message = str(err)
-                if "Commit conflict" not in error_message:
-                    raise err
-
-                last_error = err
-                delay = initial_delay * (attempt + 1)
-                logger.warning(
-                    f"Commit conflict detected when writing to LanceDB table '{self.table_name}' "
-                    f"(attempt {attempt + 1}/{max_attempts}). Retrying after {delay:.2f}s."
-                )
-                # Refresh table handle so subsequent attempts see the latest version
-                self.table = self.db.open_table(self.table_name)
-                time.sleep(delay)
-
-        assert last_error is not None  # for type checkers
-        raise last_error
 
     def search(
         self,
@@ -413,7 +305,7 @@ class BaseEmbeddingStore(StorageBase):
         # Ensure table is ready before searching
         self._ensure_table_ready()
 
-        if reranker:
+        if reranker and self.backend.caps.hybrid_search:
             search_result = self._search_hybrid(query_txt, reranker, select_fields, top_n, where)
         else:
             search_result = self._search_vector(query_txt, select_fields, top_n, where)
@@ -429,18 +321,12 @@ class BaseEmbeddingStore(StorageBase):
         top_n: Optional[int] = None,
         where: WhereExpr = None,
     ) -> pa.Table:
-        where_clause = build_where(where)
         try:
-            query_builder = self.table.search(
-                query=query_txt, query_type="hybrid", vector_column_name=self.vector_source_name
-            )
-            query_builder = BaseEmbeddingStore._fill_query(query_builder, select_fields, where_clause)
             if not top_n:
-                top_n = self.table.count_rows(where_clause) if where_clause else self.table.count_rows()
-            results = query_builder.limit(top_n * 2).rerank(reranker).to_arrow()
-            if len(results) > top_n:
-                results = results[:top_n]
-            return results
+                top_n = self.table.count(where)
+            return self.table.search_hybrid(
+                text=query_txt, top_n=top_n, where=where, select=select_fields, reranker=reranker
+            )
         except Exception as e:
             logger.warning(f"Failed to search hybrid: {str(e)}, use vector search instead")
             return self._search_vector(query_txt, select_fields, top_n, where)
@@ -452,22 +338,20 @@ class BaseEmbeddingStore(StorageBase):
         top_n: Optional[int] = None,
         where: WhereExpr = None,
     ) -> pa.Table:
-        where_clause = build_where(where)
         try:
-            query_builder = self.table.search(
-                query=query_txt, query_type="vector", vector_column_name=self.vector_column_name
-            )
-            query_builder = BaseEmbeddingStore._fill_query(query_builder, select_fields, where_clause)
             if not top_n:
-                top_n = self.table.count_rows(where_clause) if where_clause else self.table.count_rows()
-            return query_builder.limit(top_n).to_arrow()
+                top_n = self.table.count(where)
+            if self.backend.caps.native_embedding:
+                return self.table.search_text(query_txt, top_n=top_n, where=where, select=select_fields)
+            vector = self._embed_query(query_txt)
+            return self.table.search_vector(vector, top_n=top_n, where=where, select=select_fields)
         except Exception as e:
             raise DatusException(
                 ErrorCode.STORAGE_SEARCH_FAILED,
                 message_args={
                     "error_message": str(e),
                     "query": query_txt,
-                    "where_clause": where_clause if where_clause else "(none)",
+                    "where_clause": "(none)" if where is None else str(where),
                     "top_n": str(top_n or "all"),
                 },
             ) from e
@@ -475,39 +359,37 @@ class BaseEmbeddingStore(StorageBase):
     def table_size(self) -> int:
         # Ensure table is ready before checking size
         self._ensure_table_ready()
-        return self.table.count_rows()
-
-    @classmethod
-    def _fill_query(
-        cls,
-        query_builder: LanceQueryBuilder,
-        select_fields: Optional[List[str]] = None,
-        where: Optional[str] = None,
-    ) -> LanceQueryBuilder:
-        if where:
-            query_builder = query_builder.where(where, True)
-
-        if select_fields and len(select_fields) > 0:
-            query_builder = query_builder.select(select_fields)
-        return query_builder
+        return self.table.count()
 
     def update(self, where: WhereExpr, update_values: Dict[str, Any], unique_filter: Optional[WhereExpr] = None):
         self._ensure_table_ready()
         if not update_values:
             return
-        final_where = build_where(where)
-        if not final_where:
+        if where is None:
             return
-        unique_where = build_where(unique_filter)
-        if unique_where:
-            existing = self.table.count_rows(unique_where)
+        if unique_filter is not None:
+            existing = self.table.count(unique_filter)
             if existing:
                 raise DatusException(
                     ErrorCode.STORAGE_TABLE_OPERATION_FAILED,
                     message_args={
                         "operation": "update",
                         "table_name": self.table_name,
-                        "error_message": f"Conflicting rows already match {unique_where}",
+                        "error_message": "Conflicting rows already match unique_filter",
                     },
                 )
-        self.table.update(where=final_where, values=update_values)
+        self.table.update(where=where, values=update_values)
+
+    def delete(self, where: WhereExpr) -> None:
+        self._ensure_table_ready()
+        if where is None:
+            return
+        self.table.delete(where)
+
+    def count(self, where: Optional[WhereExpr] = None) -> int:
+        self._ensure_table_ready()
+        return self.table.count(where)
+
+    def _embed_query(self, text: str) -> List[float]:
+        embeddings = self.model.model.generate_embeddings([text])
+        return embeddings[0] if embeddings else []

@@ -4,8 +4,6 @@
 
 from functools import lru_cache
 from typing import List, Optional
-
-import pandas as pd
 import pyarrow as pa
 
 from datus.storage import BaseEmbeddingStore
@@ -72,19 +70,16 @@ class DocumentStore(BaseEmbeddingStore):
         # Ensure table is ready before storing
         self._ensure_table_ready()
         try:
-            # Add new document record
-            self.table.add(
-                pd.DataFrame(
-                    [
-                        {
-                            "title": title,
-                            "hierarchy": hierarchy,
-                            "keywords": keywords,
-                            "language": language,
-                            "chunk_text": chunk_text,
-                        }
-                    ]
-                )
+            self.store(
+                [
+                    {
+                        "title": title,
+                        "hierarchy": hierarchy,
+                        "keywords": keywords,
+                        "language": language,
+                        "chunk_text": chunk_text,
+                    }
+                ]
             )
         except Exception as e:
             raise DatusException(ErrorCode.STORAGE_SAVE_FAILED, message_args={"error_message": str(e)}) from e

@@ -3,80 +3,67 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 """
-Feedback storage implementation using SQLite.
+Feedback storage implementation using a relational backend (default: SQLite).
 """
 
-import os
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from datus.storage.backends.relational import ColumnSpec, TableSchema
+from datus.storage.db_manager import DBManager
+from datus.storage.lancedb_conditions import eq
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
 
 
-class FeedbackStore:
-    """SQLite-based storage for user feedback data."""
+FEEDBACK_SCHEMA = TableSchema(
+    name="feedback",
+    columns=(
+        ColumnSpec("task_id", "TEXT", nullable=False, primary_key=True),
+        ColumnSpec("status", "TEXT", nullable=False),
+        ColumnSpec("created_at", "TEXT", nullable=False),
+    ),
+)
 
-    def __init__(self, db_path: str):
+
+class FeedbackStore:
+    """Relational storage for user feedback data (default: SQLite)."""
+
+    def __init__(
+        self,
+        db_path: str,
+        backend_type: str = "sqlalchemy",
+        connection_string: Optional[str] = None,
+        ddl_mode: str = "auto",
+        **backend_config: Any,
+    ):
         """Initialize the feedback store.
 
         Args:
             db_path: Path to the directory where the SQLite database will be stored
+            backend_type: Backend type name (default: sqlalchemy)
+            connection_string: Optional SQLAlchemy connection string override
+            ddl_mode: DDL handling mode ('auto', 'disabled', 'required')
+            **backend_config: Backend-specific config
         """
         self.db_path = db_path
-        os.makedirs(db_path, exist_ok=True)
-        self.db_file = os.path.join(db_path, "feedback.db")
+        self.db_manager = DBManager.get_instance(
+            db_path,
+            db_name="feedback.db",
+            backend_type=backend_type,
+            connection_string=connection_string,
+            ddl_mode=ddl_mode,
+            **backend_config,
+        )
+        self.table = self.db_manager.ensure_table(FEEDBACK_SCHEMA)
+        self.db_location = f"{self.db_manager.db_path}/feedback.db"
         self._ensure_table()
 
     def _ensure_table(self):
         """Ensure the feedback table exists in the database."""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS feedback (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        task_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        UNIQUE(task_id)
-                    )
-                """
-                )
-
-                # Create index for faster task_id lookups
-                cursor.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_task_id ON feedback(task_id)
-                """
-                )
-
-                conn.commit()
-                logger.debug(f"Feedback table ensured in {self.db_file}")
-        except Exception as e:
-            raise DatusException(
-                ErrorCode.TOOL_STORE_FAILED, message=f"Failed to create feedback table: {str(e)}"
-            ) from e
-
-    @contextmanager
-    def _get_connection(self):
-        """Get a database connection with proper error handling."""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_file)
-            yield conn
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Database connection error: {str(e)}") from e
-        finally:
-            if conn:
-                conn.close()
+        logger.debug(f"Feedback table ensured in {self.db_location}")
 
     def record_feedback(self, task_id: str, status: str) -> Dict[str, Any]:
         """Record user feedback for a task.
@@ -93,24 +80,10 @@ class FeedbackStore:
         """
         try:
             recorded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-
-                # Use INSERT OR REPLACE to handle duplicate task_ids
-                cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO feedback (task_id, status, created_at)
-                    VALUES (?, ?, ?)
-                """,
-                    (task_id, status, recorded_at),
-                )
-
-                conn.commit()
-
-                logger.info(f"Recorded feedback for task {task_id}: {status}")
-
-                return {"task_id": task_id, "status": status, "recorded_at": recorded_at}
+            row = {"task_id": task_id, "status": status, "created_at": recorded_at}
+            self.table.upsert(row, conflict_columns=("task_id",))
+            logger.info(f"Recorded feedback for task {task_id}: {status}")
+            return {"task_id": task_id, "status": status, "recorded_at": recorded_at}
 
         except Exception as e:
             raise DatusException(
@@ -127,21 +100,14 @@ class FeedbackStore:
             Dictionary containing the feedback data, or None if not found
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT task_id, status, created_at
-                    FROM feedback
-                    WHERE task_id = ?
-                """,
-                    (task_id,),
-                )
-
-                row = cursor.fetchone()
-                if row:
-                    return {"task_id": row[0], "status": row[1], "recorded_at": row[2]}
-                return None
+            row = self.table.select_one(where=eq("task_id", task_id))
+            if row:
+                return {
+                    "task_id": row.get("task_id"),
+                    "status": row.get("status"),
+                    "recorded_at": row.get("created_at"),
+                }
+            return None
 
         except Exception as e:
             logger.error(f"Failed to get feedback for task {task_id}: {str(e)}")
@@ -154,18 +120,15 @@ class FeedbackStore:
             List of dictionaries containing all feedback data
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT task_id, status, created_at
-                    FROM feedback
-                    ORDER BY created_at DESC
-                """
-                )
-
-                rows = cursor.fetchall()
-                return [{"task_id": row[0], "status": row[1], "recorded_at": row[2]} for row in rows]
+            rows = self.table.select(order_by=[("created_at", "desc")])
+            return [
+                {
+                    "task_id": row.get("task_id"),
+                    "status": row.get("status"),
+                    "recorded_at": row.get("created_at"),
+                }
+                for row in rows
+            ]
 
         except Exception as e:
             logger.error(f"Failed to get all feedback: {str(e)}")
@@ -181,15 +144,11 @@ class FeedbackStore:
             True if feedback was deleted, False if not found
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM feedback WHERE task_id = ?", (task_id,))
-                conn.commit()
-
-                if cursor.rowcount > 0:
-                    logger.info(f"Deleted feedback for task {task_id}")
-                    return True
-                return False
+            deleted = self.table.delete(where=eq("task_id", task_id))
+            if deleted > 0:
+                logger.info(f"Deleted feedback for task {task_id}")
+                return True
+            return False
 
         except Exception as e:
             logger.error(f"Failed to delete feedback for task {task_id}: {str(e)}")

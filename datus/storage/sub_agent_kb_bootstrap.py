@@ -13,7 +13,8 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 
 from datus.configuration.agent_config import AgentConfig
 from datus.schemas.agent_models import ScopedContextLists, SubAgentConfig
-from datus.storage.lancedb_conditions import Node, and_, build_where, eq, like, or_
+from datus.storage.lancedb_conditions import Node, and_, eq, like, or_
+from datus.storage.storage_manager import StorageManager
 from datus.storage.metric.store import MetricRAG
 from datus.storage.reference_sql.store import ReferenceSqlRAG
 from datus.storage.schema_metadata.store import SchemaWithValueRAG
@@ -26,12 +27,6 @@ from datus.utils.reference_paths import normalize_reference_path
 logger = get_logger(__name__)
 
 SUPPORTED_COMPONENTS = ("metadata", "semantic_model", "metrics", "reference_sql")
-COMPONENT_DIRECTORIES = {
-    "metadata": ("schema_metadata.lance", "schema_value.lance"),
-    "semantic_model": ("semantic_model.lance",),
-    "metrics": ("metrics.lance",),
-    "reference_sql": ("reference_sql.lance",),
-}
 # TODO: Implement incremental strategy for partial updates
 SubAgentBootstrapStrategy = Literal["overwrite", "plan"]
 
@@ -196,18 +191,12 @@ class SubAgentBootstrapper:
             self._clear_component(component)
 
     def _clear_component(self, component: str):
-        if component not in COMPONENT_DIRECTORIES:
-            return
-        for segment in COMPONENT_DIRECTORIES[component]:
-            target = os.path.join(self.storage_path, segment)
-            if os.path.isdir(target):
-                shutil.rmtree(target, ignore_errors=True)
+        manager = StorageManager(self.storage_path)
+        manager.drop_component_tables(component)
 
     def _count_rows(self, storage, condition: Optional[Node]) -> int:
         try:
-            storage._ensure_table_ready()
-            where_clause = build_where(condition)
-            return storage.table.count_rows(where_clause)
+            return storage.count(condition)
         except Exception:
             return 0
 

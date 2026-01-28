@@ -13,7 +13,7 @@ from datus.schemas.base import TABLE_TYPE
 from datus.schemas.node_models import TableSchema, TableValue
 from datus.storage.base import BaseEmbeddingStore, WhereExpr
 from datus.storage.embedding_models import EmbeddingModel
-from datus.storage.lancedb_conditions import Node, and_, build_where, eq, or_
+from datus.storage.lancedb_conditions import Node, and_, eq, or_
 from datus.utils.constants import DBType
 from datus.utils.json_utils import json2csv
 from datus.utils.loggings import get_logger
@@ -211,12 +211,9 @@ class SchemaStorage(BaseMetadataStorage):
             where_condition = and_(where, table_condition)
         else:
             where_condition = table_condition
-        where_clause = build_where(where_condition)
-        return (
-            self.table.search()
-            .where(where_clause)
-            .select(["catalog_name", "database_name", "schema_name", "table_name", "table_type", "definition"])
-            .to_arrow()
+        return self._search_all(
+            where=where_condition,
+            select_fields=["catalog_name", "database_name", "schema_name", "table_name", "table_type", "definition"],
         )
 
 
@@ -362,10 +359,6 @@ class SchemaWithValueRAG:
         """
         Search schemas and values for given table names.
         """
-        # Ensure tables are ready before direct table access
-        self.schema_store._ensure_table_ready()
-        self.value_store._ensure_table_ready()
-
         # Parse table names and build where clause
         table_conditions = []
         for full_table in tables:
@@ -425,39 +418,37 @@ class SchemaWithValueRAG:
                     )
                 )
 
+        combined_condition = None
         if table_conditions:
             combined_condition = table_conditions[0] if len(table_conditions) == 1 else or_(*table_conditions)
-            where_clause = build_where(combined_condition)
-            schema_query = self.schema_store.table.search().where(where_clause)
-            value_query = self.value_store.table.search().where(where_clause)
-        else:
-            schema_query = self.schema_store.table.search()
-            value_query = self.value_store.table.search()
 
-        # Search schemas
-        schema_results = (
-            schema_query.select(
-                ["identifier", "catalog_name", "database_name", "schema_name", "table_name", "table_type", "definition"]
-            )
-            .limit(len(tables))
-            .to_arrow()
+        schema_results = self.schema_store._search_all(
+            where=combined_condition,
+            select_fields=[
+                "identifier",
+                "catalog_name",
+                "database_name",
+                "schema_name",
+                "table_name",
+                "table_type",
+                "definition",
+            ],
+            limit=len(tables),
         )
         schemas_result = TableSchema.from_arrow(schema_results)
 
-        value_results = (
-            value_query.select(
-                [
-                    "identifier",
-                    "catalog_name",
-                    "database_name",
-                    "schema_name",
-                    "table_name",
-                    "table_type",
-                    "sample_rows",
-                ]
-            )
-            .limit(len(tables))
-            .to_arrow()
+        value_results = self.value_store._search_all(
+            where=combined_condition,
+            select_fields=[
+                "identifier",
+                "catalog_name",
+                "database_name",
+                "schema_name",
+                "table_name",
+                "table_type",
+                "sample_rows",
+            ],
+            limit=len(tables),
         )
         values_result = TableValue.from_arrow(value_results)
 
@@ -482,9 +473,10 @@ class SchemaWithValueRAG:
             table_name=table_name,
             table_type=table_type,
         )
-        where_clause = build_where(where_condition) if where_condition else None
-        self.schema_store.table.delete(where_clause)
-        self.value_store.table.delete(where_clause)
+        if where_condition is None:
+            return
+        self.schema_store.delete(where_condition)
+        self.value_store.delete(where_condition)
 
 
 def _build_where_clause(

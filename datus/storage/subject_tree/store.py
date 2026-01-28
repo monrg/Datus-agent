@@ -1,11 +1,9 @@
-"""SQLite-based storage for hierarchical subject taxonomy tree.
+"""Relational storage for hierarchical subject taxonomy tree (default: SQLite).
 
 This module implements a tree structure using the adjacency list model,
 following the pattern established by TaskStore for consistency.
 """
 import fnmatch
-import os
-import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
@@ -13,8 +11,11 @@ import pyarrow as pa
 from lancedb.pydantic import LanceModel
 
 from datus.storage import BaseEmbeddingStore
+from datus.storage.db_manager import DBManager
+from datus.storage.backends.relational import ColumnSpec, IndexSpec, TableSchema
 from datus.storage.embedding_models import EmbeddingModel
-from datus.storage.lancedb_conditions import and_, in_, like
+from datus.storage.lancedb_conditions import and_, eq, in_, like
+from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
@@ -24,81 +25,63 @@ SUBJECT_PATH_COLUMN_NAME = "subject_path"
 NAME_COLUMN_NAME = "name"
 CREATED_AT_COLUMN_NAME = "created_at"
 
+SUBJECT_TREE_SCHEMA = TableSchema(
+    name="subject_nodes",
+    columns=(
+        ColumnSpec("node_id", "INTEGER", nullable=False, primary_key=True, autoincrement=True),
+        ColumnSpec("parent_id", "INTEGER", nullable=True),
+        ColumnSpec("name", "TEXT", nullable=False),
+        ColumnSpec("description", "TEXT", nullable=True, default=""),
+        ColumnSpec("created_at", "TEXT", nullable=False),
+        ColumnSpec("updated_at", "TEXT", nullable=False),
+    ),
+    indexes=(
+        IndexSpec("idx_subject_parent_id", ("parent_id",)),
+        IndexSpec("idx_subject_parent_name", ("parent_id", "name"), unique=True),
+    ),
+    unique_constraints=(("parent_id", "name"),),
+)
+
 
 class SubjectTreeStore:
-    """SQLite-based storage for hierarchical subject taxonomy tree.
+    """Relational storage for hierarchical subject taxonomy tree (default: SQLite).
 
     Implements adjacency list model for tree structure.
     Follows the pattern established by TaskStore for consistency.
 
     Attributes:
         db_path: Directory path for database storage
-        db_file: Full path to the SQLite database file
+        db_location: Backend-specific location string
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        backend_type: str = "sqlalchemy",
+        connection_string: Optional[str] = None,
+        ddl_mode: str = "auto",
+        **backend_config: Any,
+    ):
         """Initialize SubjectTreeStore.
 
         Args:
             db_path: Directory path for database storage
+            backend_type: Backend type name (default: sqlalchemy)
+            connection_string: Optional SQLAlchemy connection string override
+            ddl_mode: DDL handling mode ('auto', 'disabled', 'required')
+            **backend_config: Backend-specific config
         """
         self.db_path = db_path
-        os.makedirs(db_path, exist_ok=True)
-        self.db_file = os.path.join(db_path, "subject_tree.db")
-        self._ensure_table()
-        logger.info(f"SubjectTreeStore initialized at {self.db_file}")
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection with row factory."""
-        conn = sqlite3.connect(self.db_file)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _ensure_table(self):
-        """Create subject_nodes table and indices if not exists."""
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-
-            # Create main table
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS subject_nodes (
-                    node_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    parent_id INTEGER,
-                    name TEXT NOT NULL,
-                    description TEXT DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(parent_id, name)
-                )
-            """
-            )
-
-            # Create indices
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_subject_parent_id
-                ON subject_nodes(parent_id)
-            """
-            )
-
-            cursor.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_subject_parent_name
-                ON subject_nodes(parent_id, name)
-            """
-            )
-
-            conn.commit()
-            logger.debug("Subject nodes table and indices created/verified")
-
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Failed to create subject_nodes table: {e}")
-            raise
-        finally:
-            conn.close()
+        self.db_manager = DBManager.get_instance(
+            db_path,
+            db_name="subject_tree.db",
+            backend_type=backend_type,
+            connection_string=connection_string,
+            ddl_mode=ddl_mode,
+            **backend_config,
+        )
+        self.table = self.db_manager.ensure_table(SUBJECT_TREE_SCHEMA)
+        logger.info(f"SubjectTreeStore initialized at {self.db_manager.db_path}")
 
     # ========== CRUD Operations ==========
 
@@ -115,7 +98,7 @@ class SubjectTreeStore:
 
         Raises:
             ValueError: If validation fails
-            sqlite3.IntegrityError: If duplicate name under same parent
+            IntegrityError: If duplicate name under same parent
         """
         # Validate name
         if not name or not name.strip():
@@ -131,39 +114,26 @@ class SubjectTreeStore:
 
         # Create node
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        conn = self._get_connection()
+        row = {
+            "parent_id": parent_id,
+            "name": name,
+            "description": description,
+            "created_at": now,
+            "updated_at": now,
+        }
         try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO subject_nodes
-                (parent_id, name, description, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-                (parent_id, name, description, now, now),
-            )
-
-            node_id = cursor.lastrowid
-            conn.commit()
-
-            # Get created node to get full path for logging
-            created_node = self.get_node(node_id)
-            logger.info(f"Created node: {self.get_full_path(node_id)} (node_id={node_id})")
-
-            return created_node
-
-        except sqlite3.IntegrityError as e:
-            conn.rollback()
-            if "UNIQUE constraint failed" in str(e):
+            node_id = self.table.insert(row)
+        except DatusException as e:
+            if e.code == ErrorCode.DB_CONSTRAINT_VIOLATION:
                 raise ValueError(f"Node with name '{name}' already exists under parent {parent_id}")
             raise
         except Exception as e:
-            conn.rollback()
             logger.error(f"Failed to create node: {e}")
             raise
-        finally:
-            conn.close()
+
+        created_node = self.get_node(node_id)
+        logger.info(f"Created node: {self.get_full_path(node_id)} (node_id={node_id})")
+        return created_node
 
     def get_node(self, node_id: int) -> Optional[Dict[str, Any]]:
         """Get node by ID.
@@ -174,23 +144,7 @@ class SubjectTreeStore:
         Returns:
             Node dict or None if not found
         """
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM subject_nodes WHERE node_id = ?
-            """,
-                (node_id,),
-            )
-
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-
-        finally:
-            conn.close()
+        return self.table.select_one(where=eq("node_id", node_id))
 
     def get_node_by_path(self, path: List[str]) -> Optional[Dict[str, Any]]:
         """Get node by path components.
@@ -246,19 +200,16 @@ class SubjectTreeStore:
             return False
 
         # Prepare update values
-        update_fields = []
-        update_values = []
+        update_values: Dict[str, Any] = {}
 
         if name is not None:
             name = name.strip()
             if not name:
                 raise ValueError("Node name cannot be empty")
-            update_fields.append("name = ?")
-            update_values.append(name)
+            update_values["name"] = name
 
         if description is not None:
-            update_fields.append("description = ?")
-            update_values.append(description)
+            update_values["description"] = description
 
         # Handle parent_id change
         if parent_id is not None:
@@ -277,49 +228,28 @@ class SubjectTreeStore:
                     raise ValueError(f"Parent node {parent_id} not found")
 
             # Update parent
-            update_fields.append("parent_id = ?")
-            update_values.append(parent_id)
+            update_values["parent_id"] = parent_id
 
-        if not update_fields:
+        if not update_values:
             logger.debug(f"No fields to update for node {node_id}")
             return True
 
         # Always update updated_at
-        update_fields.append("updated_at = ?")
-        update_values.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        update_values["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Add node_id for WHERE clause
-        update_values.append(node_id)
-
-        conn = self._get_connection()
         try:
-            cursor = conn.cursor()
-
-            # Execute update
-            cursor.execute(
-                f"""
-                UPDATE subject_nodes
-                SET {', '.join(update_fields)}
-                WHERE node_id = ?
-            """,
-                update_values,
-            )
-
-            conn.commit()
-            logger.info(f"Updated node {node_id}")
-            return True
-
-        except sqlite3.IntegrityError as e:
-            conn.rollback()
-            if "UNIQUE constraint failed" in str(e):
+            updated = self.table.update(where=eq("node_id", node_id), values=update_values)
+            if updated > 0:
+                logger.info(f"Updated node {node_id}")
+                return True
+            return False
+        except DatusException as e:
+            if e.code == ErrorCode.DB_CONSTRAINT_VIOLATION:
                 raise ValueError(f"Node with name '{name}' already exists under parent {parent_id}")
             raise
         except Exception as e:
-            conn.rollback()
             logger.error(f"Failed to update node {node_id}: {e}")
             raise
-        finally:
-            conn.close()
 
     def delete_node(self, node_id: int, cascade: bool = True) -> bool:
         """Delete node.
@@ -354,25 +284,17 @@ class SubjectTreeStore:
         # Get path before deletion for logging
         node_path = self.get_full_path(node_id)
 
-        conn = self._get_connection()
         try:
-            cursor = conn.cursor()
             for descendant in descendants:
                 child_path = self.get_full_path(descendant["node_id"])
-                cursor.execute("DELETE FROM subject_nodes WHERE node_id = ?", (descendant["node_id"],))
+                self.table.delete(eq("node_id", descendant["node_id"]))
                 logger.info(f"Deleted child node {descendant['node_id']} ({child_path})")
-            cursor.execute("DELETE FROM subject_nodes WHERE node_id = ?", (node_id,))
-            conn.commit()
+            self.table.delete(eq("node_id", node_id))
             logger.info(f"Deleted node {node_id} ({node_path})" + (" with cascade" if cascade else ""))
-
             return True
-
         except Exception as e:
-            conn.rollback()
             logger.error(f"Failed to delete node {node_id}: {e}")
             raise
-        finally:
-            conn.close()
 
     # ========== Tree Traversal ==========
 
@@ -385,33 +307,8 @@ class SubjectTreeStore:
         Returns:
             List of child nodes
         """
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-
-            if parent_id is None:
-                cursor.execute(
-                    """
-                    SELECT * FROM subject_nodes
-                    WHERE parent_id IS NULL
-                    ORDER BY name
-                """
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT * FROM subject_nodes
-                    WHERE parent_id = ?
-                    ORDER BY name
-                """,
-                    (parent_id,),
-                )
-
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-
-        finally:
-            conn.close()
+        where = eq("parent_id", None) if parent_id is None else eq("parent_id", parent_id)
+        return self.table.select(where=where, order_by=[("name", "asc")])
 
     def get_descendants(self, node_id: int) -> List[Dict[str, Any]]:
         """Get all descendants (recursive) of a node.
@@ -629,34 +526,11 @@ class SubjectTreeStore:
 
     def _find_child_by_name(self, parent_id: Optional[int], name: str) -> Optional[Dict[str, Any]]:
         """Find a child node by name under a specific parent."""
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-
-            if parent_id is None:
-                cursor.execute(
-                    """
-                    SELECT * FROM subject_nodes
-                    WHERE parent_id IS NULL AND name = ?
-                """,
-                    (name,),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT * FROM subject_nodes
-                    WHERE parent_id = ? AND name = ?
-                """,
-                    (parent_id, name),
-                )
-
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-
-        finally:
-            conn.close()
+        if parent_id is None:
+            where = and_(eq("parent_id", None), eq("name", name))
+        else:
+            where = and_(eq("parent_id", parent_id), eq("name", name))
+        return self.table.select_one(where=where)
 
     def rename(self, old_path: List[str], new_path: List[str]) -> bool:
         """Rename a subject node by moving it to a new path.

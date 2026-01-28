@@ -3,85 +3,72 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 """
-Task storage implementation using SQLite.
+Task storage implementation using a relational backend (default: SQLite).
 """
 
-import os
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+from datus.storage.backends.relational import ColumnSpec, TableSchema
+from datus.storage.db_manager import DBManager
+from datus.storage.lancedb_conditions import and_, eq, lt, ne
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
 
 
-class TaskStore:
-    """SQLite-based storage for task and feedback data."""
+TASK_SCHEMA = TableSchema(
+    name="tasks",
+    columns=(
+        ColumnSpec("task_id", "TEXT", nullable=False, primary_key=True),
+        ColumnSpec("task_query", "TEXT", nullable=False),
+        ColumnSpec("sql_query", "TEXT", nullable=True, default=""),
+        ColumnSpec("sql_result", "TEXT", nullable=True, default=""),
+        ColumnSpec("status", "TEXT", nullable=True, default=""),
+        ColumnSpec("user_feedback", "TEXT", nullable=True, default=""),
+        ColumnSpec("created_at", "TEXT", nullable=False),
+        ColumnSpec("updated_at", "TEXT", nullable=False),
+    ),
+)
 
-    def __init__(self, db_path: str):
+
+class TaskStore:
+    """Relational storage for task and feedback data (default: SQLite)."""
+
+    def __init__(
+        self,
+        db_path: str,
+        backend_type: str = "sqlalchemy",
+        connection_string: Optional[str] = None,
+        ddl_mode: str = "auto",
+        **backend_config: Any,
+    ):
         """Initialize the task store.
 
         Args:
             db_path: Path to the directory where the SQLite database will be stored
+            backend_type: Backend type name (default: sqlalchemy)
+            connection_string: Optional SQLAlchemy connection string override
+            ddl_mode: DDL handling mode ('auto', 'disabled', 'required')
+            **backend_config: Backend-specific config
         """
         self.db_path = db_path
-        os.makedirs(db_path, exist_ok=True)
-        self.db_file = os.path.join(db_path, "task.db")
+        self.db_manager = DBManager.get_instance(
+            db_path,
+            db_name="task.db",
+            backend_type=backend_type,
+            connection_string=connection_string,
+            ddl_mode=ddl_mode,
+            **backend_config,
+        )
+        self.table = self.db_manager.ensure_table(TASK_SCHEMA)
+        self.db_location = f"{self.db_manager.db_path}/task.db"
         self._ensure_table()
 
     def _ensure_table(self):
-        """Ensure the feedback and tasks tables exist in the database."""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-
-                # Create unified tasks table with user feedback
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS tasks (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        task_id TEXT NOT NULL,
-                        task_query TEXT NOT NULL,
-                        sql_query TEXT DEFAULT '',
-                        sql_result TEXT DEFAULT '',
-                        status TEXT DEFAULT 'running',
-                        user_feedback TEXT DEFAULT '',
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(task_id)
-                    )
-                """
-                )
-
-                # Create index for faster lookups
-                cursor.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_tasks_task_id ON tasks(task_id)
-                """
-                )
-
-                conn.commit()
-                logger.debug(f"Tasks table ensured in {self.db_file}")
-        except Exception as e:
-            raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Failed to create tasks table: {str(e)}") from e
-
-    @contextmanager
-    def _get_connection(self):
-        """Get a database connection with proper error handling."""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_file)
-            yield conn
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Database connection error: {str(e)}") from e
-        finally:
-            if conn:
-                conn.close()
+        """Ensure the tasks table exists in the database."""
+        logger.debug(f"Tasks table ensured in {self.db_location}")
 
     def record_feedback(self, task_id: str, status: str) -> Dict[str, Any]:
         """Record user feedback for a task.
@@ -98,51 +85,30 @@ class TaskStore:
         """
         try:
             updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            updated = self.table.update(
+                where=eq("task_id", task_id),
+                values={"user_feedback": status, "updated_at": updated_at},
+            )
 
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
+            if updated == 0:
+                raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Task {task_id} not found")
 
-                # Update user_feedback field for the task
-                cursor.execute(
-                    """
-                    UPDATE tasks SET user_feedback = ?, updated_at = ?
-                    WHERE task_id = ?
-                """,
-                    (status, updated_at, task_id),
-                )
-
-                if cursor.rowcount == 0:
-                    raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Task {task_id} not found")
-
-                conn.commit()
-
-                # Get the updated task data
-                cursor.execute(
-                    """
-                    SELECT task_id, task_query, sql_query, sql_result, status, user_feedback, created_at, updated_at
-                    FROM tasks
-                    WHERE task_id = ?
-                    """,
-                    (task_id,),
-                )
-
-                row = cursor.fetchone()
-                if row:
-                    logger.info(f"Recorded feedback for task {task_id}: {status}")
-                    return {
-                        "task_id": row[0],
-                        "task_query": row[1],
-                        "sql_query": row[2],
-                        "sql_result": row[3],
-                        "status": row[4],
-                        "user_feedback": row[5],
-                        "created_at": row[6],
-                        "recorded_at": row[7],  # Use updated_at as recorded_at for compatibility
-                    }
-                else:
-                    raise DatusException(
-                        ErrorCode.TOOL_STORE_FAILED, message=f"Failed to retrieve updated task {task_id}"
-                    )
+            row = self.table.select_one(where=eq("task_id", task_id))
+            if row:
+                logger.info(f"Recorded feedback for task {task_id}: {status}")
+                return {
+                    "task_id": row.get("task_id"),
+                    "task_query": row.get("task_query"),
+                    "sql_query": row.get("sql_query"),
+                    "sql_result": row.get("sql_result"),
+                    "status": row.get("status"),
+                    "user_feedback": row.get("user_feedback"),
+                    "created_at": row.get("created_at"),
+                    "recorded_at": row.get("updated_at"),  # Use updated_at as recorded_at for compatibility
+                }
+            raise DatusException(
+                ErrorCode.TOOL_STORE_FAILED, message=f"Failed to retrieve updated task {task_id}"
+            )
 
         except Exception as e:
             raise DatusException(
@@ -159,30 +125,19 @@ class TaskStore:
             Dictionary containing the task data with feedback, or None if not found
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT task_id, task_query, sql_query, sql_result, status, user_feedback, created_at, updated_at
-                    FROM tasks
-                    WHERE task_id = ? AND user_feedback != ''
-                """,
-                    (task_id,),
-                )
-
-                row = cursor.fetchone()
-                if row:
-                    return {
-                        "task_id": row[0],
-                        "task_query": row[1],
-                        "sql_query": row[2],
-                        "sql_result": row[3],
-                        "status": row[4],
-                        "user_feedback": row[5],
-                        "created_at": row[6],
-                        "recorded_at": row[7],
-                    }
-                return None
+            row = self.table.select_one(where=and_(eq("task_id", task_id), ne("user_feedback", "")))
+            if row:
+                return {
+                    "task_id": row.get("task_id"),
+                    "task_query": row.get("task_query"),
+                    "sql_query": row.get("sql_query"),
+                    "sql_result": row.get("sql_result"),
+                    "status": row.get("status"),
+                    "user_feedback": row.get("user_feedback"),
+                    "created_at": row.get("created_at"),
+                    "recorded_at": row.get("updated_at"),
+                }
+            return None
 
         except Exception as e:
             logger.error(f"Failed to get feedback for task {task_id}: {str(e)}")
@@ -195,31 +150,23 @@ class TaskStore:
             List of dictionaries containing all tasks with feedback
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT task_id, task_query, sql_query, sql_result, status, user_feedback, created_at, updated_at
-                    FROM tasks
-                    WHERE user_feedback != ''
-                    ORDER BY updated_at DESC
-                """
-                )
-
-                rows = cursor.fetchall()
-                return [
-                    {
-                        "task_id": row[0],
-                        "task_query": row[1],
-                        "sql_query": row[2],
-                        "sql_result": row[3],
-                        "status": row[4],
-                        "user_feedback": row[5],
-                        "created_at": row[6],
-                        "recorded_at": row[7],
-                    }
-                    for row in rows
-                ]
+            rows = self.table.select(
+                where=ne("user_feedback", ""),
+                order_by=[("updated_at", "desc")],
+            )
+            return [
+                {
+                    "task_id": row.get("task_id"),
+                    "task_query": row.get("task_query"),
+                    "sql_query": row.get("sql_query"),
+                    "sql_result": row.get("sql_result"),
+                    "status": row.get("status"),
+                    "user_feedback": row.get("user_feedback"),
+                    "created_at": row.get("created_at"),
+                    "recorded_at": row.get("updated_at"),
+                }
+                for row in rows
+            ]
 
         except Exception as e:
             logger.error(f"Failed to get all feedback: {str(e)}")
@@ -236,22 +183,14 @@ class TaskStore:
         """
         try:
             updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE tasks SET user_feedback = '', updated_at = ?
-                    WHERE task_id = ? AND user_feedback != ''
-                    """,
-                    (updated_at, task_id),
-                )
-                conn.commit()
-
-                if cursor.rowcount > 0:
-                    logger.info(f"Cleared feedback for task {task_id}")
-                    return True
-                return False
+            updated = self.table.update(
+                where=and_(eq("task_id", task_id), ne("user_feedback", "")),
+                values={"user_feedback": "", "updated_at": updated_at},
+            )
+            if updated > 0:
+                logger.info(f"Cleared feedback for task {task_id}")
+                return True
+            return False
 
         except Exception as e:
             logger.error(f"Failed to clear feedback for task {task_id}: {str(e)}")
@@ -273,31 +212,19 @@ class TaskStore:
         """
         try:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-
-                cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO tasks (task_id, task_query, created_at, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (task_id, task_query, now, now),
-                )
-
-                conn.commit()
-                logger.debug(f"Created task record for {task_id}")
-
-                return {
-                    "task_id": task_id,
-                    "task_query": task_query,
-                    "sql_query": "",
-                    "sql_result": "",
-                    "status": "running",
-                    "user_feedback": "",
-                    "created_at": now,
-                    "updated_at": now,
-                }
+            row = {
+                "task_id": task_id,
+                "task_query": task_query,
+                "sql_query": "",
+                "sql_result": "",
+                "status": "running",
+                "user_feedback": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.table.upsert(row, conflict_columns=("task_id",))
+            logger.debug(f"Created task record for {task_id}")
+            return row
 
         except Exception as e:
             raise DatusException(
@@ -318,40 +245,21 @@ class TaskStore:
         """
         try:
             updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-
-                # Build dynamic update query based on provided parameters
-                updates = []
-                params = []
-
-                if sql_query is not None:
-                    updates.append("sql_query = ?")
-                    params.append(sql_query)
-
-                if sql_result is not None:
-                    updates.append("sql_result = ?")
-                    params.append(sql_result)
-
-                if status is not None:
-                    updates.append("status = ?")
-                    params.append(status)
-
-                updates.append("updated_at = ?")
-                params.append(updated_at)
-                params.append(task_id)
-
-                if updates:
-                    query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?"
-                    cursor.execute(query, params)
-                    conn.commit()
-
-                    if cursor.rowcount > 0:
-                        logger.debug(f"Updated task {task_id}")
-                        return True
-
+            values: Dict[str, Any] = {}
+            if sql_query is not None:
+                values["sql_query"] = sql_query
+            if sql_result is not None:
+                values["sql_result"] = sql_result
+            if status is not None:
+                values["status"] = status
+            if not values:
                 return False
+            values["updated_at"] = updated_at
+            updated = self.table.update(where=eq("task_id", task_id), values=values)
+            if updated > 0:
+                logger.debug(f"Updated task {task_id}")
+                return True
+            return False
 
         except Exception as e:
             logger.error(f"Failed to update task {task_id}: {str(e)}")
@@ -367,30 +275,19 @@ class TaskStore:
             Dictionary containing the task data, or None if not found
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT task_id, task_query, sql_query, sql_result, status, user_feedback, created_at, updated_at
-                    FROM tasks
-                    WHERE task_id = ?
-                    """,
-                    (task_id,),
-                )
-
-                row = cursor.fetchone()
-                if row:
-                    return {
-                        "task_id": row[0],
-                        "task_query": row[1],
-                        "sql_query": row[2],
-                        "sql_result": row[3],
-                        "status": row[4],
-                        "user_feedback": row[5],
-                        "created_at": row[6],
-                        "updated_at": row[7],
-                    }
-                return None
+            row = self.table.select_one(where=eq("task_id", task_id))
+            if row:
+                return {
+                    "task_id": row.get("task_id"),
+                    "task_query": row.get("task_query"),
+                    "sql_query": row.get("sql_query"),
+                    "sql_result": row.get("sql_result"),
+                    "status": row.get("status"),
+                    "user_feedback": row.get("user_feedback"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                }
+            return None
 
         except Exception as e:
             logger.error(f"Failed to get task {task_id}: {str(e)}")
@@ -406,15 +303,11 @@ class TaskStore:
             True if task was deleted, False if not found
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
-                conn.commit()
-
-                if cursor.rowcount > 0:
-                    logger.debug(f"Deleted task {task_id}")
-                    return True
-                return False
+            deleted = self.table.delete(where=eq("task_id", task_id))
+            if deleted > 0:
+                logger.debug(f"Deleted task {task_id}")
+                return True
+            return False
 
         except Exception as e:
             logger.error(f"Failed to delete task {task_id}: {str(e)}")
@@ -432,17 +325,10 @@ class TaskStore:
         try:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             cutoff_str = cutoff_time.isoformat().replace("+00:00", "Z")
-
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM tasks WHERE created_at < ?", (cutoff_str,))
-                conn.commit()
-
-                deleted_count = cursor.rowcount
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} old tasks")
-
-                return deleted_count
+            deleted_count = self.table.delete(where=lt("created_at", cutoff_str))
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old tasks")
+            return deleted_count
 
         except Exception as e:
             logger.error(f"Failed to cleanup old tasks: {str(e)}")
