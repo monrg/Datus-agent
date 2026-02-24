@@ -1,10 +1,14 @@
 import argparse
+import json
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from dotenv import load_dotenv
 
 from datus.configuration.agent_config import AgentConfig
 from datus.configuration.agent_config_loader import load_agent_config
@@ -13,6 +17,65 @@ from datus.configuration.agent_config_loader import load_agent_config
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 PROJECT_ROOT = Path(__file__).parent.parent
+DEEPSEEK_PRECHECK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_BALANCE_ERROR_HINTS = (
+    "insufficient balance",
+    "payment required",
+    "quota",
+    "billing",
+    "invalid_request_error",
+)
+
+
+@lru_cache(maxsize=1)
+def _acceptance_skip_reason() -> str | None:
+    """Return a skip reason for acceptance tests when DeepSeek is unavailable."""
+    if os.getenv("DATUS_FORCE_ACCEPTANCE", "").strip().lower() in {"1", "true", "yes"}:
+        return None
+
+    load_dotenv()
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return "Skipping acceptance tests: DEEPSEEK_API_KEY is not configured."
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    try:
+        response = httpx.post(DEEPSEEK_PRECHECK_URL, headers=headers, json=payload, timeout=15.0)
+    except httpx.RequestError:
+        # Keep running tests on transient network failures so true regressions are still visible.
+        return None
+
+    if response.status_code < 400:
+        return None
+
+    try:
+        error_text = json.dumps(response.json()).lower()
+    except ValueError:
+        error_text = response.text.lower()
+
+    if response.status_code in {401, 403}:
+        return "Skipping acceptance tests: DeepSeek API credentials are invalid in CI."
+
+    if response.status_code in {402, 429} or any(hint in error_text for hint in DEEPSEEK_BALANCE_ERROR_HINTS):
+        return "Skipping acceptance tests: DeepSeek API balance/quota is unavailable in CI."
+
+    return None
+
+
+@pytest.fixture(autouse=True)
+def skip_acceptance_when_deepseek_unavailable(request):
+    if request.node.get_closest_marker("acceptance") is None:
+        return
+
+    reason = _acceptance_skip_reason()
+    if reason:
+        pytest.skip(reason)
 
 
 @pytest.fixture
