@@ -279,9 +279,7 @@ class BaseEmbeddingStore(StorageBase):
                 key = row.get(on_column)
                 seen[key] = row
             if len(seen) < len(data):
-                logger.debug(
-                    f"Deduplicated {len(data) - len(seen)} records with duplicate '{on_column}' before upsert"
-                )
+                logger.debug(f"Deduplicated {len(data) - len(seen)} records with duplicate '{on_column}' before upsert")
             data = list(seen.values())
 
         try:
@@ -308,7 +306,9 @@ class BaseEmbeddingStore(StorageBase):
         # Ensure table is ready before searching
         self._ensure_table_ready()
 
-        use_hybrid = self.backend.caps.hybrid_search and (reranker is not None or not self.backend.caps.native_embedding)
+        use_hybrid = self.backend.caps.hybrid_search and (
+            reranker is not None or not self.backend.caps.native_embedding
+        )
         if use_hybrid:
             search_result = self._search_hybrid(query_txt, reranker, select_fields, top_n, where)
         else:
@@ -429,9 +429,7 @@ class BaseEmbeddingStore(StorageBase):
             raise DatusException(
                 ErrorCode.STORAGE_SAVE_FAILED,
                 message_args={
-                    "error_message": (
-                        f"Embedding count mismatch: expected {len(to_embed)} got {len(embeddings)}"
-                    )
+                    "error_message": (f"Embedding count mismatch: expected {len(to_embed)} got {len(embeddings)}")
                 },
             )
 

@@ -106,9 +106,7 @@ class TaskStore:
                     "created_at": row.get("created_at"),
                     "recorded_at": row.get("updated_at"),  # Use updated_at as recorded_at for compatibility
                 }
-            raise DatusException(
-                ErrorCode.TOOL_STORE_FAILED, message=f"Failed to retrieve updated task {task_id}"
-            )
+            raise DatusException(ErrorCode.TOOL_STORE_FAILED, message=f"Failed to retrieve updated task {task_id}")
 
         except Exception as e:
             raise DatusException(

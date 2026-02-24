@@ -438,9 +438,7 @@ class SQLAlchemyBackend(RelationalBackend):
     def _create_table_with_capability(self, table: Table, schema: TableSchema) -> None:
         if self._ddl_mode == "disabled":
             self._ddl_capable = False
-            raise DatusException(
-                ErrorCode.DB_TABLE_NOT_EXISTS, message_args={"table_name": schema.name}
-            )
+            raise DatusException(ErrorCode.DB_TABLE_NOT_EXISTS, message_args={"table_name": schema.name})
 
         try:
             table.create(self._connector.engine, checkfirst=True)
@@ -467,9 +465,7 @@ class SQLAlchemyBackend(RelationalBackend):
         if missing:
             raise DatusException(
                 ErrorCode.DB_EXECUTION_ERROR,
-                message_args={
-                    "error_message": f"Table {schema.name} missing columns: {', '.join(missing)}"
-                },
+                message_args={"error_message": f"Table {schema.name} missing columns: {', '.join(missing)}"},
             )
 
     def _build_table(self, schema: TableSchema) -> Table:

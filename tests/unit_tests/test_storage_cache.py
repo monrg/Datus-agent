@@ -20,6 +20,7 @@ class DummyAgentConfig(AgentConfig):
     def relational_backend_options(self) -> dict:
         return {}
 
+
 def _build_cache(tmp_path):
     return StorageCache(agent_config=DummyAgentConfig(tmp_path))
 

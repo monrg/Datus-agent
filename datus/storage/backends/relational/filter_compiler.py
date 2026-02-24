@@ -41,9 +41,7 @@ class SQLFilterCompiler:
         """
         self.placeholder = placeholder
 
-    def compile(
-        self, expr: Optional[Union[Condition, And, Or, Not, str, Any]]
-    ) -> Tuple[Optional[str], List[Any]]:
+    def compile(self, expr: Optional[Union[Condition, And, Or, Not, str, Any]]) -> Tuple[Optional[str], List[Any]]:
         """Compile a FilterExpr to SQL WHERE clause with parameters.
 
         Args:
@@ -64,9 +62,7 @@ class SQLFilterCompiler:
         clause = self._compile_node(expr, params)
         return clause, params
 
-    def _compile_node(
-        self, node: Union[Condition, And, Or, Not, Any], params: List[Any]
-    ) -> str:
+    def _compile_node(self, node: Union[Condition, And, Or, Not, Any], params: List[Any]) -> str:
         """Recursively compile an AST node.
 
         Args:
@@ -211,9 +207,7 @@ class SQLFilterCompiler:
 
         # Check if quoting is needed
         first_char_requires_quote = not (safe[0].isalpha() or safe[0] == "_")
-        needs_quote = first_char_requires_quote or any(
-            c in safe for c in ' "().-+/\\|&*[]=<>!'
-        )
+        needs_quote = first_char_requires_quote or any(c in safe for c in ' "().-+/\\|&*[]=<>!')
 
         if needs_quote:
             escaped = safe.replace('"', '""')
@@ -246,9 +240,7 @@ class SQLFilterCompiler:
 _default_compiler = SQLFilterCompiler()
 
 
-def compile_filter(
-    expr: Optional[Union[Condition, And, Or, Not, str, Any]]
-) -> Tuple[Optional[str], List[Any]]:
+def compile_filter(expr: Optional[Union[Condition, And, Or, Not, str, Any]]) -> Tuple[Optional[str], List[Any]]:
     """Compile a FilterExpr to SQL WHERE clause with parameters.
 
     Convenience function using the default compiler.

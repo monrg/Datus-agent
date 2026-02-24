@@ -90,18 +90,12 @@ class DBManager:
             backend_class = _BACKEND_REGISTRY.get(backend_type)
         if backend_class is None:
             available = ", ".join(_BACKEND_REGISTRY.keys())
-            raise ValueError(
-                f"Unknown backend type: {backend_type}. Available: {available}"
-            )
+            raise ValueError(f"Unknown backend type: {backend_type}. Available: {available}")
 
         # Initialize backend
-        self._backend: RelationalBackend = backend_class(
-            db_path=db_path, db_name=db_name, **backend_config
-        )
+        self._backend: RelationalBackend = backend_class(db_path=db_path, db_name=db_name, **backend_config)
 
-        logger.debug(
-            f"DBManager initialized: path={db_path}, db={db_name}, backend={backend_type}"
-        )
+        logger.debug(f"DBManager initialized: path={db_path}, db={db_name}, backend={backend_type}")
 
     @classmethod
     def get_instance(

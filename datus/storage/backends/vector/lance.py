@@ -244,7 +244,9 @@ class LanceTable(VectorTable):
 
 class LanceBackend(VectorBackend):
     name = "lancedb"
-    caps = BackendCapabilities(vector_search=True, hybrid_search=True, fts=True, scalar_index=True, native_embedding=True)
+    caps = BackendCapabilities(
+        vector_search=True, hybrid_search=True, fts=True, scalar_index=True, native_embedding=True
+    )
 
     def __init__(self, db_path: str):
         self.db_path = db_path
