@@ -35,3 +35,4 @@ before_reflection_*.yaml
 logs
 .claude
 /.omc
+*.iml

@@ -26,6 +26,7 @@ Here's a high-level summary of each module and how they relate:
 | **[Nodes](nodes.md)** | Task-level processing units | Each "node" handles a specific step (schema linking, SQL generation, reasoning, reflection, output formatting, chat, utilities) in the data-to-SQL pipeline |
 | **[Workflow](workflow.md)** | Orchestration of nodes | Defines execution plans (sequential, parallel, sub-workflows, reflection paths) that specify how nodes are chained to answer a user's query |
 | **[Storage](storage.md)** | Embeddings & vector store configuration | Manages embedding models, device settings, embedding storage paths, and how metadata / documents / metrics are embedded and retrieved |
+| **[Vector Backends](vector_backends.md)** | Vector backend extension and pgvector operations | Explains plugin-based vector backend architecture, PostgreSQL pgvector setup, required DDL flow, verification, and extension guidelines |
 | **[Namespace](namespace.md)** | Database connection abstraction | Encapsulates configurations for different databases (Snowflake, StarRocks, SQLite, DuckDB, etc.), allowing multi-database support under logical "namespaces" |
 | **[Benchmark](benchmark.md)** | Evaluation & testing setup | Defines benchmark datasets (e.g. BIRD-DEV, Spider2, semantic layer) and paths to evaluate the SQL-generation performance of the agent |
 
@@ -117,4 +118,5 @@ Explore the detailed configuration for each component:
 - **[Workflow Definitions](workflow.md)**: Define custom execution patterns
 - **[Node Configuration](nodes.md)**: Customize individual node behavior
 - **[Storage Settings](storage.md)**: Configure knowledge base and vector storage
+- **[Vector Backend Extensions](vector_backends.md)**: Enable pgvector and add new vector database backends
 - **[Benchmark Datasets](benchmark.md)**: Set up evaluation and testing
