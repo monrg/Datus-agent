@@ -11,8 +11,8 @@ import pyarrow as pa
 from lancedb.pydantic import LanceModel
 
 from datus.storage import BaseEmbeddingStore
-from datus.storage.db_manager import DBManager
 from datus.storage.backends.relational import ColumnSpec, IndexSpec, TableSchema
+from datus.storage.db_manager import DBManager
 from datus.storage.embedding_models import EmbeddingModel
 from datus.storage.lancedb_conditions import and_, eq, in_, like
 from datus.utils.exceptions import DatusException, ErrorCode

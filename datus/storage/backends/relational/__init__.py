@@ -14,9 +14,9 @@ from .interfaces import (
     TableSchema,
     TransactionContext,
 )
-from .sqlite_backend import SQLiteBackend, SQLiteTable, SQLiteTransaction
 from .sqlalchemy_backend import SQLAlchemyBackend, SQLAlchemyTable, SQLAlchemyTransaction
 from .sqlalchemy_connector import SQLAlchemyConnector
+from .sqlite_backend import SQLiteBackend, SQLiteTable, SQLiteTransaction
 
 __all__ = [
     # Interfaces

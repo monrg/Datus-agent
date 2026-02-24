@@ -9,16 +9,8 @@ This module provides pattern-based permission control (allow/deny/ask)
 for all tool types in Datus-agent, following Claude Code and OpenCode patterns.
 """
 
-from datus.tools.permission.permission_config import (
-    PermissionConfig,
-    PermissionLevel,
-    PermissionRule,
-)
-from datus.tools.permission.permission_hooks import (
-    CompositeHooks,
-    PermissionDeniedException,
-    PermissionHooks,
-)
+from datus.tools.permission.permission_config import PermissionConfig, PermissionLevel, PermissionRule
+from datus.tools.permission.permission_hooks import CompositeHooks, PermissionDeniedException, PermissionHooks
 from datus.tools.permission.permission_manager import PermissionManager
 
 __all__ = [

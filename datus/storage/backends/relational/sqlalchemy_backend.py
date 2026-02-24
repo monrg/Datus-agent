@@ -10,23 +10,16 @@ import os
 import threading
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import (
-    Column,
-    MetaData,
-    Table,
-    and_ as sa_and,
-    delete as sa_delete,
-    false as sa_false,
-    func,
-    inspect,
-    literal,
-    not_ as sa_not,
-    or_ as sa_or,
-    select,
-    text,
-    true as sa_true,
-    update as sa_update,
-)
+from sqlalchemy import Column, MetaData, Table
+from sqlalchemy import and_ as sa_and
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import false as sa_false
+from sqlalchemy import func, inspect, literal
+from sqlalchemy import not_ as sa_not
+from sqlalchemy import or_ as sa_or
+from sqlalchemy import select, text
+from sqlalchemy import true as sa_true
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -37,7 +30,6 @@ from sqlalchemy.sql.elements import ClauseElement
 from sqlalchemy.sql.schema import Index, UniqueConstraint
 from sqlalchemy.types import Boolean, Date, DateTime, Float, Integer, LargeBinary, String, Text
 
-from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.storage.backends.relational.interfaces import (
     ColumnSpec,
     IndexSpec,
@@ -47,6 +39,7 @@ from datus.storage.backends.relational.interfaces import (
     TableSchema,
     TransactionContext,
 )
+from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.storage.lancedb_conditions import And, Condition, Not, Op, Or
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger

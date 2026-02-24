@@ -35,10 +35,10 @@ from datus.storage.semantic_model.semantic_model_init import (
     init_success_story_semantic_model,
 )
 from datus.storage.semantic_model.store import SemanticModelRAG
-from datus.storage.sub_agent_kb_bootstrap import SUPPORTED_COMPONENTS as SUB_AGENT_COMPONENTS
-from datus.storage.subject_tree.store import SubjectTreeStore
-from datus.storage.sub_agent_kb_bootstrap import SubAgentBootstrapper
 from datus.storage.storage_manager import StorageManager, build_default_artifact_stores
+from datus.storage.sub_agent_kb_bootstrap import SUPPORTED_COMPONENTS as SUB_AGENT_COMPONENTS
+from datus.storage.sub_agent_kb_bootstrap import SubAgentBootstrapper
+from datus.storage.subject_tree.store import SubjectTreeStore
 from datus.tools.db_tools.db_manager import DBManager, db_manager_instance
 from datus.utils.benchmark_utils import load_benchmark_tasks
 from datus.utils.constants import SYS_SUB_AGENTS

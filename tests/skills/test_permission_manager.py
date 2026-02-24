@@ -8,11 +8,7 @@ Unit tests for PermissionManager.
 Tests permission checking, filtering, and node-specific overrides.
 """
 
-from datus.tools.permission.permission_config import (
-    PermissionConfig,
-    PermissionLevel,
-    PermissionRule,
-)
+from datus.tools.permission.permission_config import PermissionConfig, PermissionLevel, PermissionRule
 from datus.tools.permission.permission_manager import PermissionManager
 
 

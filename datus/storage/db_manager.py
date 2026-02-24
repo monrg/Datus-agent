@@ -20,8 +20,8 @@ from datus.storage.backends.relational.interfaces import (
     TableSchema,
     TransactionContext,
 )
-from datus.storage.backends.relational.sqlite_backend import SQLiteBackend
 from datus.storage.backends.relational.sqlalchemy_backend import SQLAlchemyBackend
+from datus.storage.backends.relational.sqlite_backend import SQLiteBackend
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)

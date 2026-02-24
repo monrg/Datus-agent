@@ -12,13 +12,9 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.storage.backends.relational.filter_compiler import SQLFilterCompiler
-from datus.storage.backends.relational.interfaces import (
-    ColumnSpec,
-    RelationalCapabilities,
-    TableSchema,
-)
+from datus.storage.backends.relational.interfaces import ColumnSpec, RelationalCapabilities, TableSchema
+from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
