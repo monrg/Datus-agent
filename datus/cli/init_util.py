@@ -13,6 +13,7 @@ from rich.console import Console
 from datus.configuration.agent_config import AgentConfig
 from datus.utils.loggings import get_logger, print_rich_exception
 from datus.utils.path_manager import get_path_manager
+from datus.utils.path_utils import safe_rmtree
 
 logger = get_logger(__name__)
 console = Console()
@@ -122,6 +123,13 @@ def init_metrics(
                 messages = payload.get("messages")
                 if messages:
                     output_mgr.add_llm_output(str(messages))
+                # Capture summary from the final action (SemanticNodeResult with success + response)
+                output = payload.get("output")
+                if output and isinstance(output, dict) and output.get("success") and output.get("response"):
+                    response = output["response"]
+                    if isinstance(response, str) and response.strip():
+                        output_mgr.summary_outputs.clear()
+                        output_mgr.add_summary_content(response)
                 return
 
             if stage == BatchStage.TASK_COMPLETED:
@@ -163,6 +171,7 @@ def init_semantic_model(
     agent_config: AgentConfig,
     build_mode: Literal["incremental", "overwrite"] = "incremental",
     console: Optional[Console] = None,
+    force: bool = False,
 ) -> tuple[bool, Optional[dict[str, Any]]]:
     """Initialize semantic model using success stories.
 
@@ -171,6 +180,7 @@ def init_semantic_model(
         agent_config: Agent configuration
         build_mode: Build mode (incremental or overwrite)
         console: Optional Rich console for output
+        force: If True, skip confirmation prompts for deletion
 
     Returns:
         Tuple of (success: bool, result: Optional[dict])
@@ -196,9 +206,11 @@ def init_semantic_model(
             # Also clear semantic_models/{namespace} directory (YAML files)
             path_manager = get_path_manager(datus_home=agent_config.home)
             semantic_yaml_dir = path_manager.semantic_model_path(agent_config.current_namespace)
-            if semantic_yaml_dir.exists():
-                shutil.rmtree(semantic_yaml_dir)
-                logger.info(f"Deleted existing semantic YAML directory {semantic_yaml_dir}")
+            if semantic_yaml_dir.exists() and not safe_rmtree(
+                semantic_yaml_dir, "semantic YAML directory", force=force
+            ):
+                console.print("[yellow]Cancelled by user[/yellow]")
+                return False, None
             agent_config.save_storage_config("semantic_model")
 
         # Create StreamOutputManager
@@ -221,6 +233,13 @@ def init_semantic_model(
                 messages = payload.get("messages")
                 if messages:
                     output_mgr.add_llm_output(str(messages))
+                # Capture summary from the final action (SemanticNodeResult with success + response)
+                output = payload.get("output")
+                if output and isinstance(output, dict) and output.get("success") and output.get("response"):
+                    response = output["response"]
+                    if isinstance(response, str) and response.strip():
+                        output_mgr.summary_outputs.clear()
+                        output_mgr.add_summary_content(response)
                 return
 
             if stage == BatchStage.TASK_COMPLETED:

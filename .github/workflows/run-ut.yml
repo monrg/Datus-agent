@@ -1,6 +1,16 @@
 name: unit test
 on:
+  workflow_dispatch:
+    inputs:
+      force-rebuild-kb:
+        description: 'Force rebuild knowledge base data'
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      force-rebuild-kb:
+        type: boolean
+        default: false
     outputs:
       build-artifact:
         description: "Built artifact path"
@@ -20,9 +30,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install -r requirements-test.txt
+          pip install --upgrade --no-cache-dir datus-semantic-metricflow
 
       - name: Setup config file
         run: |
@@ -49,13 +69,30 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Cache knowledge base data
+        id: kb-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            tests/data/datus_db_bird_school
+            tests/data/datus_db_bird_sqlite
+            tests/data/datus_db_ssb_sqlite
+          key: ${{ runner.os }}-kb-${{ hashFiles('build_scripts/build_test_data.sh', 'sample_data/**', 'datus/storage/**/*.py') }}
+          restore-keys: |
+            ${{ runner.os }}-kb-
+
       - name: Build test data
+        if: steps.kb-cache.outputs.cache-hit != 'true' || inputs.force-rebuild-kb == true
         run: |
           echo "Building test data before running pytest..."
           chmod +x build_scripts/build_test_data.sh
           ./build_scripts/build_test_data.sh || exit 1
           echo "Test data build completed"
 
-      - name: run pytest
+      - name: run acceptance tests
         run: |
-          python -m pytest -m acceptance  tests/
+          python -m pytest -m acceptance tests/
+
+      - name: run regression tests (single model)
+        run: |
+          python -m pytest -m regression --single-model tests/regression/test_regression_llm.py

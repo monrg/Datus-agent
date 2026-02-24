@@ -188,10 +188,8 @@ class GenMetricsAgenticNode(AgenticNode):
     def _setup_hooks(self):
         """Setup hooks for interactive mode."""
         try:
-            from rich.console import Console
-
-            console = Console()
-            self.hooks = GenerationHooks(console=console, agent_config=self.agent_config)
+            broker = self._get_or_create_broker()
+            self.hooks = GenerationHooks(broker=broker, agent_config=self.agent_config)
             logger.info("Setup hooks: generation_hooks")
         except Exception as e:
             logger.error(f"Failed to setup generation_hooks: {e}")
@@ -281,7 +279,8 @@ class GenMetricsAgenticNode(AgenticNode):
             # Use prompt manager to render the template
             from datus.prompts.prompt_manager import prompt_manager
 
-            return prompt_manager.render_template(template_name=template_name, version=version, **template_vars)
+            base_prompt = prompt_manager.render_template(template_name=template_name, version=version, **template_vars)
+            return self._finalize_system_prompt(base_prompt)
 
         except FileNotFoundError as e:
             # Template not found - throw DatusException
@@ -371,17 +370,6 @@ class GenMetricsAgenticNode(AgenticNode):
                 enhanced_message = (
                     f"{separator.join(enhanced_parts)}{separator}User question: {user_input.user_message}"
                 )
-
-            # Create assistant action for processing
-            assistant_action = ActionHistory.create_action(
-                role=ActionRole.ASSISTANT,
-                action_type="llm_generation",
-                messages="Generating response with tools...",
-                input_data={"prompt": enhanced_message, "system": system_instruction},
-                status=ActionStatus.PROCESSING,
-            )
-            action_history_manager.add_action(assistant_action)
-            yield assistant_action
 
             logger.debug(f"Tools available : {len(self.tools)} tools - {[tool.name for tool in self.tools]}")
             logger.debug(f"MCP servers available : {len(self.mcp_servers)} servers - {list(self.mcp_servers.keys())}")

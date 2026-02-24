@@ -1,7 +1,7 @@
 # Project basic information configuration, required.
 [project]
 name = "datus-agent"
-version = "0.2.4"
+version = "0.2.5"
 description = "AI-powered SQL Agent for data engineering (Compiled Version)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,13 +29,13 @@ dependencies = [
     "sqlglot>=26.12.0",
     "pyyaml==6.0.1",
     "structlog>=23.1.0",
-    "openai>=1.95.0",
+    "openai>=2.8.0",
     "httpx[socks]==0.27.2",
     "tantivy>=0.22.2",
     "aiohttp>=3.11.16",
     "xlsxwriter>=3.2.2",
-    "tiktoken>=0.9.0",
-    "openai-agents==0.3.2",
+    "openai-agents[litellm]==0.7.0",
+    "litellm>=1.67.4.post1,<2",
     "pydantic>=2.11.7,<3.0",
     "lancedb==0.18.0",
     # This library is required by lancedb
@@ -63,6 +63,11 @@ dependencies = [
     "uv>=0.9.9",
     "plotly>=6.5.0",
     "charset-normalizer>=3.4.2",
+    # Platform documentation tools
+    "PyGithub>=2.1.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "markdown-it-py>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -79,6 +84,7 @@ Repository = "https://github.com/datus-ai/datus-agent"
 datus-agent = "datus.main:main"
 datus-cli = "datus.cli.main:main"
 datus = "datus.cli.main:main"
+datus-mcp = "datus.mcp_server:main"
 
 [[tool.uv.index]]
 url = "http://mirrors.aliyun.com/pypi/simple"
@@ -153,4 +159,5 @@ dev = [
     "flake8>=7.3.0",
     "isort>=6.0.1",
     "langsmith>=0.0.77",
+    "langsmith-fetch>=0.1.0",
 ]

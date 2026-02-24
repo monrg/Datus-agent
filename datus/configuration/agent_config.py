@@ -3,7 +3,9 @@
 # See http://www.apache.org/licenses/LICENSE-2.0 for details.
 
 import os
+import re
 from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from datus.configuration.node_type import NodeType
@@ -15,6 +17,9 @@ from datus.utils.constants import DBType
 from datus.utils.exceptions import DatusException, ErrorCode
 from datus.utils.loggings import get_logger
 from datus.utils.path_utils import get_files_from_glob_pattern
+
+# Regex for validating platform/identifier names (no special chars that break paths)
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
 @dataclass
@@ -71,15 +76,19 @@ class DbConfig:
 @dataclass
 class ModelConfig:
     type: str
-    base_url: str
     api_key: str
     model: str
+    base_url: Optional[str] = None
     save_llm_trace: bool = False
-    enable_thinking: bool = False
+    enable_thinking: bool = False  # Set True to enable thinking/reasoning mode
+    strict_json_schema: bool = True  # Enable strict JSON schema mode for structured output
     default_headers: Optional[Dict[str, str]] = None
     # Retry configuration for stream connection errors
     max_retry: int = 3
     retry_interval: float = 2.0  # seconds
+    # Model-specific parameters
+    temperature: Optional[float] = None  # Some models like kimi-k2.5 require temperature=1
+    top_p: Optional[float] = None  # Some models like kimi-k2.5 require top_p=0.95
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -128,6 +137,63 @@ class BenchmarkConfig:
             raise DatusException(
                 ErrorCode.COMMON_FIELD_REQUIRED, message="question_id_key in benchmark configuration cannot be empty"
             )
+
+
+@dataclass
+class DocumentConfig:
+    """Per-platform document fetch configuration.
+
+    Maps to YAML ``agent.document.{platform}`` and CLI ``platform-doc`` args.
+    """
+
+    type: str = "local"  # github / website / local
+    source: Optional[str] = None  # GitHub repo "owner/repo", URL, or local path
+    version: Optional[str] = None  # Document version (auto-detected if omitted)
+    github_ref: Optional[str] = None  # Git branch / tag / commit
+    github_token: Optional[str] = None
+    paths: List[str] = field(default_factory=lambda: ["docs", "README.md"])
+    chunk_size: int = 1024
+    max_depth: int = 2  # Max crawl depth for website source
+    include_patterns: Optional[List[str]] = None  # File/URL patterns to include
+    exclude_patterns: Optional[List[str]] = None  # File/URL patterns to exclude
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DocumentConfig":
+        valid_fields = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in valid_fields})
+
+    def merge_cli_args(self, args) -> "DocumentConfig":
+        """Return a new config with non-None CLI args overriding YAML values.
+
+        CLI attr -> DocumentConfig field mapping:
+          source_type -> type, source -> source, version -> version,
+          github_ref -> github_ref, paths -> paths,
+          chunk_size -> chunk_size, max_depth -> max_depth,
+          include_patterns -> include_patterns, exclude_patterns -> exclude_patterns
+        """
+        mapping = {
+            "source_type": "type",
+            "source": "source",
+            "version": "version",
+            "github_ref": "github_ref",
+            "github_token": "github_token",
+            "paths": "paths",
+            "chunk_size": "chunk_size",
+            "max_depth": "max_depth",
+            "include_patterns": "include_patterns",
+            "exclude_patterns": "exclude_patterns",
+        }
+        overrides = {}
+        for cli_attr, cfg_field in mapping.items():
+            cli_val = getattr(args, cli_attr, None)
+            if cli_val is not None:
+                if isinstance(cli_val, str):
+                    overrides[cfg_field] = resolve_env(cli_val)
+                else:
+                    overrides[cfg_field] = cli_val
+        data = {f.name: getattr(self, f.name) for f in fields(self)}
+        data.update(overrides)
+        return DocumentConfig(**data)
 
 
 @dataclass
@@ -210,6 +276,12 @@ class AgentConfig:
         self.init_dashboard(kwargs.get("dashboard", {}))
 
         for name, raw_config in self.agentic_nodes.items():
+            if not _SAFE_NAME_RE.match(name):
+                raise DatusException(
+                    ErrorCode.COMMON_FIELD_INVALID,
+                    message=f"Invalid agentic_node name '{name}'. "
+                    f"Only alphanumeric characters, underscores, and hyphens are allowed.",
+                )
             if not raw_config.get("system_prompt"):
                 raw_config["system_prompt"] = name
 
@@ -246,6 +318,33 @@ class AgentConfig:
             self.storage_backends = storage_config.get("backends", {}) if isinstance(storage_config, dict) else {}
         else:
             self.storage_backends = {}
+
+        # Initialize unified permission system
+        self.permissions_config = self._init_permissions_config(kwargs.get("permissions", {}))
+
+        # Initialize skills configuration
+        self.skills_config = self._init_skills_config(kwargs.get("skills", {}))
+
+        # Platform documentation fetch configs (namespace-independent)
+        document_raw = kwargs.get("document", {}) or {}
+        # Extract tavily_api_key from document config (top-level, not a platform)
+        tavily_key_raw = document_raw.pop("tavily_api_key", None)
+        if tavily_key_raw:
+            self.tavily_api_key = resolve_env(str(tavily_key_raw))
+        else:
+            self.tavily_api_key = None
+
+        self.document_configs: Dict[str, DocumentConfig] = {}
+        for name, cfg in document_raw.items():
+            if not isinstance(cfg, dict):
+                continue
+            if not _SAFE_NAME_RE.match(name):
+                raise DatusException(
+                    ErrorCode.COMMON_FIELD_INVALID,
+                    message=f"Invalid document platform name '{name}'. "
+                    f"Only alphanumeric characters, underscores, and hyphens are allowed.",
+                )
+            self.document_configs[name] = DocumentConfig.from_dict(cfg)
 
         self._init_dirs()
 
@@ -300,6 +399,12 @@ class AgentConfig:
 
     def _init_namespace_config(self, namespace_config: Dict[str, Any]):
         for namespace, db_config_dict in namespace_config.items():
+            if not _SAFE_NAME_RE.match(namespace):
+                raise DatusException(
+                    ErrorCode.COMMON_FIELD_INVALID,
+                    message=f"Invalid namespace name '{namespace}'. "
+                    f"Only alphanumeric characters, underscores, and hyphens are allowed.",
+                )
             db_type = db_config_dict.get("type", "")
             self.namespaces[namespace] = {}
             if db_type in (DBType.SQLITE, DBType.DUCKDB):
@@ -350,6 +455,46 @@ class AgentConfig:
                 ),
             )
 
+    def _init_permissions_config(self, permissions_raw: Dict[str, Any]):
+        """Initialize unified permission configuration.
+
+        Args:
+            permissions_raw: Raw permissions config from agent.yml
+
+        Returns:
+            PermissionConfig instance or None
+        """
+        if not permissions_raw:
+            return None
+
+        try:
+            from datus.tools.permission.permission_config import PermissionConfig
+
+            return PermissionConfig.from_dict(permissions_raw)
+        except Exception as e:
+            logger.warning(f"Failed to initialize permissions config: {e}")
+            return None
+
+    def _init_skills_config(self, skills_raw: Dict[str, Any]):
+        """Initialize skills configuration.
+
+        Args:
+            skills_raw: Raw skills config from agent.yml
+
+        Returns:
+            SkillConfig instance or None
+        """
+        if not skills_raw:
+            return None
+
+        try:
+            from datus.tools.skill_tools.skill_config import SkillConfig
+
+            return SkillConfig.from_dict(skills_raw)
+        except Exception as e:
+            logger.warning(f"Failed to initialize skills config: {e}")
+            return None
+
     def current_db_config(self, db_name: str = "") -> DbConfig:
         configs = self.namespaces[self._current_namespace]
         if len(configs) == 1:
@@ -383,10 +528,12 @@ class AgentConfig:
         Returns:
             Path string for save storage
         """
-        from datus.utils.path_manager import get_path_manager
+        return str(self.save_run_dir(self._current_namespace, run_id))
 
-        path_manager = get_path_manager()
-        return str(path_manager.save_run_dir(self._current_namespace, run_id))
+    def save_run_dir(self, namespace: str, run_id: Optional[str] = None) -> Path:
+        from datus.utils.path_manager import DatusPathManager
+
+        return DatusPathManager.resolve_run_dir(Path(self._save_dir), namespace, run_id)
 
     @property
     def trajectory_dir(self) -> str:
@@ -402,10 +549,13 @@ class AgentConfig:
         Returns:
             Path string for trajectory storage
         """
-        from datus.utils.path_manager import get_path_manager
 
-        path_manager = get_path_manager()
-        return str(path_manager.trajectory_run_dir(self._current_namespace, run_id))
+        return str(self.trajectory_run_dir(self._current_namespace, run_id))
+
+    def trajectory_run_dir(self, namespace: str, run_id: Optional[str] = None) -> Path:
+        from datus.utils.path_manager import DatusPathManager
+
+        return DatusPathManager.resolve_run_dir(Path(self._trajectory_dir), namespace, run_id)
 
     def reflection_nodes(self, strategy: str) -> List[str]:
         if strategy not in self._reflection_nodes:
@@ -476,6 +626,12 @@ class AgentConfig:
                     f"Please place it within the {self.home}/benchmark directory."
                 )
                 continue
+            if not _SAFE_NAME_RE.match(k):
+                raise DatusException(
+                    ErrorCode.COMMON_FIELD_INVALID,
+                    message=f"Invalid benchmark name '{k}'. "
+                    f"Only alphanumeric characters, underscores, and hyphens are allowed.",
+                )
             if not v.get("benchmark_path"):
                 v["benchmark_path"] = k
             self.benchmark_configs[k] = BenchmarkConfig.filter_kwargs(BenchmarkConfig, v)
@@ -498,7 +654,7 @@ class AgentConfig:
             self.search_metrics_rate = kwargs["search_metrics_rate"]
         if kwargs.get("plan", ""):
             self.workflow_plan = kwargs["plan"]
-        if kwargs.get("action", "") not in ["probe-llm", "generate-dataset", "namespace"]:
+        if kwargs.get("action", "") not in ["probe-llm", "generate-dataset", "namespace", "platform-doc"]:
             self.current_namespace = kwargs.get("namespace", "")
         if database_name := kwargs.get("database", ""):
             self.current_database = database_name
@@ -680,6 +836,17 @@ class AgentConfig:
             "schema": schema_name,
         }
 
+    def document_storage_path(self, platform: str) -> str:
+        """Per-platform document storage path (namespace-independent).
+
+        Returns: {home}/data/document/{platform}/
+        """
+        return os.path.join(self.rag_base_path, "document", platform)
+
+    def document_storage_base_path(self) -> str:
+        """Base document storage directory: {home}/data/document/"""
+        return os.path.join(self.rag_base_path, "document")
+
     def sub_agent_storage_path(self, sub_agent_name: str):
         return os.path.join(self.rag_base_path, "sub_agents", sub_agent_name)
 
@@ -755,17 +922,22 @@ def resolve_env(value: str) -> str:
 def load_model_config(data: dict) -> ModelConfig:
     max_retry = data.get("max_retry")
     retry_interval = data.get("retry_interval")
+    temperature = data.get("temperature")
+    top_p = data.get("top_p")
 
     return ModelConfig(
         type=data["type"],
-        base_url=resolve_env(data["base_url"]),
+        base_url=resolve_env(data["base_url"]) if "base_url" in data else None,
         api_key=resolve_env(data["api_key"]),
         model=resolve_env(data["model"]),
         save_llm_trace=data.get("save_llm_trace", False),
         enable_thinking=data.get("enable_thinking", False),
+        strict_json_schema=data.get("strict_json_schema", True),
         default_headers=data.get("default_headers"),
         max_retry=int(max_retry) if max_retry is not None else 3,
         retry_interval=float(retry_interval) if retry_interval is not None else 2.0,
+        temperature=float(temperature) if temperature is not None else None,
+        top_p=float(top_p) if top_p is not None else None,
     )
 
 

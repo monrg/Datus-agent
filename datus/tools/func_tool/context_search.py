@@ -15,8 +15,21 @@ from datus.storage.reference_sql.store import ReferenceSqlRAG
 from datus.storage.semantic_model.store import SemanticModelRAG
 from datus.tools.func_tool.base import FuncToolResult, trans_to_function_tool
 from datus.utils.loggings import get_logger
+from datus.utils.mcp_decorators import mcp_tool, mcp_tool_class
 
 logger = get_logger(__name__)
+
+
+def _normalize_null(value: Any) -> Any:
+    """Convert string 'null' to None for LLM compatibility.
+
+    LLMs sometimes output the string 'null' instead of JSON null.
+    This function normalizes such values to Python None.
+    """
+    if value == "null" or value == "None":
+        return None
+    return value
+
 
 _NAME = "context_search_tools"
 _NAME_LIST_SUBJECT_TREE = "context_search_tools.list_subject_tree"
@@ -29,7 +42,45 @@ _NAME_KNOWLEDGE = "context_search_tools.search_knowledge"
 _NAME_GET_KNOWLEDGE = "context_search_tools.get_knowledge"
 
 
+@mcp_tool_class(
+    name="context_tool",
+    availability_property="has_context_tools",
+)
 class ContextSearchTools:
+    @classmethod
+    def create_dynamic(cls, agent_config: AgentConfig, sub_agent_name: Optional[str] = None) -> "ContextSearchTools":
+        """
+        Create ContextSearchTools instance for dynamic mode.
+
+        Args:
+            agent_config: Agent configuration
+            sub_agent_name: Optional sub-agent name
+
+        Returns:
+            ContextSearchTools instance
+        """
+        return cls(agent_config, sub_agent_name=sub_agent_name)
+
+    @classmethod
+    def create_static(
+        cls,
+        agent_config: AgentConfig,
+        sub_agent_name: Optional[str] = None,
+        database_name: Optional[str] = None,
+    ) -> "ContextSearchTools":
+        """
+        Create ContextSearchTools instance for static mode.
+
+        Args:
+            agent_config: Agent configuration
+            sub_agent_name: Optional sub-agent name
+            database_name: Optional database name (unused, for API compatibility)
+
+        Returns:
+            ContextSearchTools instance
+        """
+        return cls(agent_config, sub_agent_name=sub_agent_name)
+
     def __init__(self, agent_config: AgentConfig, sub_agent_name: Optional[str] = None):
         self.agent_config = agent_config
         self.sub_agent_name = sub_agent_name
@@ -122,6 +173,7 @@ class ContextSearchTools:
 
         return tools
 
+    @mcp_tool()
     def list_subject_tree(self) -> FuncToolResult:
         """
         Get the domain-layer taxonomy from subject_tree store with metrics and SQL counts.
@@ -195,6 +247,7 @@ class ContextSearchTools:
             logger.warning("Failed to collect ext knowledge: %s", exc)
             return []
 
+    @mcp_tool(availability_check="has_metrics")
     def search_metrics(
         self,
         query_text: str,
@@ -212,6 +265,8 @@ class ContextSearchTools:
         Returns:
             FuncToolResult with list of matching metrics containing name, description, constraint, and sql_query
         """
+        # Normalize null values from LLM
+        subject_path = _normalize_null(subject_path)
         try:
             metrics = self.metric_rag.search_metrics(
                 query_text=query_text,
@@ -224,6 +279,7 @@ class ContextSearchTools:
             logger.error(f"Failed to search metrics for '{query_text}': {e}")
             return FuncToolResult(success=0, error=str(e))
 
+    @mcp_tool(availability_check="has_metrics")
     def get_metrics(self, subject_path: List[str], name: str = "") -> FuncToolResult:
         """
         Search for business metrics and KPIs using natural language queries.
@@ -235,6 +291,8 @@ class ContextSearchTools:
         Returns:
             FuncToolResult with metrics containing name, description, constraint, and sql_query
         """
+        # Normalize null values from LLM
+        name = _normalize_null(name) or ""
         try:
             metrics = self.metric_rag.get_metrics_detail(
                 subject_path=subject_path,
@@ -249,6 +307,7 @@ class ContextSearchTools:
             logger.error(f"Failed to get metrics details for `{'/'.join(subject_path)}/{name}`: {str(e)}")
             return FuncToolResult(success=0, error=str(e))
 
+    @mcp_tool(availability_check="has_reference_sql")
     def search_reference_sql(
         self, query_text: str, subject_path: Optional[List[str]] = None, top_n: int = 5
     ) -> FuncToolResult:
@@ -271,6 +330,8 @@ class ContextSearchTools:
                     - 'summary'
                     - 'file_path'
         """
+        # Normalize null values from LLM
+        subject_path = _normalize_null(subject_path)
         try:
             result = self.reference_sql_store.search_reference_sql(
                 query_text=query_text,
@@ -283,6 +344,7 @@ class ContextSearchTools:
             logger.error(f"Failed to search reference SQL for `{query_text}`: {e}")
             return FuncToolResult(success=0, error=str(e))
 
+    @mcp_tool(availability_check="has_reference_sql")
     def get_reference_sql(self, subject_path: List[str], name: str = "") -> FuncToolResult:
         """
         Get reference SQL query for a domain and layer combination.
@@ -301,6 +363,8 @@ class ContextSearchTools:
                     - 'summary'
                     - 'file_path'
         """
+        # Normalize null values from LLM
+        name = _normalize_null(name) or ""
         try:
             result = self.reference_sql_store.get_reference_sql_detail(
                 subject_path=subject_path, name=name, selected_fields=["name", "sql", "summary", "tags"]
@@ -312,6 +376,7 @@ class ContextSearchTools:
             logger.error(f"Failed to get reference SQL for `{'/'.join(subject_path)}/{name}`: {e}")
             return FuncToolResult(success=0, error=str(e))
 
+    @mcp_tool(availability_check="has_semantic_objects")
     def search_semantic_objects(
         self,
         query_text: str,
@@ -335,6 +400,8 @@ class ContextSearchTools:
                 - _distance: Similarity score (lower is better)
                 - Additional fields specific to object kind (e.g., available_dimensions for metrics)
         """
+        # Normalize null values from LLM
+        kinds = _normalize_null(kinds)
         try:
             results = self.semantic_rag.storage.search_objects(
                 query_text=query_text,
@@ -348,6 +415,7 @@ class ContextSearchTools:
             logger.error(f"Failed to search semantic objects for '{query_text}': {str(e)}")
             return FuncToolResult(success=0, error=str(e))
 
+    @mcp_tool(availability_check="has_knowledge")
     def search_knowledge(
         self, query_text: str, subject_path: Optional[List[str]] = None, top_n: int = 5
     ) -> FuncToolResult:
@@ -367,6 +435,8 @@ class ContextSearchTools:
                     - 'search_text': Business search_text/concept
                     - 'explanation': Detailed explanation of the search_text
         """
+        # Normalize null values from LLM
+        subject_path = _normalize_null(subject_path)
         try:
             result = self.ext_knowledge_rag.query_knowledge(
                 query_text=query_text,
@@ -379,34 +449,38 @@ class ContextSearchTools:
             logger.error(f"Failed to search knowledge for `{query_text}`: {e}")
             return FuncToolResult(success=0, error=str(e))
 
-    def get_knowledge(self, subject_path: List[str], name: str = "") -> FuncToolResult:
+    @mcp_tool(availability_check="has_knowledge")
+    def get_knowledge(self, paths: List[List[str]]) -> FuncToolResult:
         """
-        Get external business knowledge by subject path and name.
+        Get multiple external business knowledge entries by their full paths.
+        MUST call `list_subject_tree` first to get the tree structure and available knowledge paths.
 
         Args:
-            subject_path: Subject hierarchy path (e.g., ['Finance', 'Revenue', 'Q1'])
-            name: The name of the knowledge entry
+            paths: List of full paths, where each path is a list containing
+                   subject_path components followed by the knowledge name.
+                   e.g., [['Finance', 'Revenue', 'Q1', 'knowledge_name1'],
+                          ['Sales', 'Marketing', 'knowledge_name2']]
 
         Returns:
             FuncToolResult with keys:
                 - 'success' (int): 1 if the search succeeded, 0 otherwise.
                 - 'error' (str or None): Error message if any.
-                - 'result' (dict): On success, the knowledge entry containing:
+                - 'result' (list): On success, list of knowledge entries, each containing:
                     - 'search_text': Business search_text/concept
                     - 'explanation': Detailed explanation of the search_text
         """
         try:
-            result = self.ext_knowledge_rag.get_knowledge_detail(
-                subject_path=subject_path,
-                name=name,
-            )
+            if not paths:
+                return FuncToolResult(success=0, error="No paths provided", result=None)
+
+            result = self.ext_knowledge_rag.get_knowledge_batch(paths=paths)
             logger.debug(f"result of get_knowledge: {result}")
             if result:
-                return FuncToolResult(success=1, error=None, result=result[0])
+                return FuncToolResult(success=1, error=None, result=result)
             else:
                 return FuncToolResult(success=0, error="No matched result", result=None)
         except Exception as e:
-            logger.error(f"Failed to get knowledge for `{'/'.join(subject_path)}/{name}`: {e}")
+            logger.error(f"Failed to get knowledge for paths `{paths}`: {e}")
             return FuncToolResult(success=0, error=str(e))
 
 

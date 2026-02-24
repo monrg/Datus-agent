@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
@@ -27,6 +29,7 @@ from rich.table import Table
 
 if TYPE_CHECKING:
     from datus.agent.workflow_runner import WorkflowRunner
+
 from datus.cli._cli_utils import prompt_input
 from datus.cli.agent_commands import AgentCommands
 from datus.cli.autocomplete import AtReferenceCompleter, CustomPygmentsStyle, CustomSqlLexer, SubagentCompleter
@@ -138,7 +141,8 @@ class DatusCLI:
             "!search_metrics": self.agent_commands.cmd_search_metrics,
             "!sq": self.agent_commands.cmd_search_reference_sql,
             "!search_sql": self.agent_commands.cmd_search_reference_sql,
-            # "!doc_search": self.agent_commands.cmd_doc_search,
+            "!sd": self.agent_commands.cmd_doc_search,
+            "!search_document": self.agent_commands.cmd_doc_search,
             # "!gen": self.agent_commands.cmd_gen,
             # "!fix": self.agent_commands.cmd_fix,
             "!save": self.agent_commands.cmd_save,
@@ -179,7 +183,8 @@ class DatusCLI:
         if not self.check_agent_available():
             raise RuntimeError("Agent not initialized. Cannot create workflow runner.")
         if not self._workflow_runner:
-            self._workflow_runner = self.agent.create_workflow_runner()
+            # use day as run_id in cli
+            self._workflow_runner = self._create_workflow_runner()
         return self._workflow_runner
 
     def _create_custom_key_bindings(self):
@@ -293,14 +298,14 @@ class DatusCLI:
 
         sql_completer = SQLCompleter()
         self.at_completer = AtReferenceCompleter(self.agent_config)  # Router completer
-        subagent_completer = SubagentCompleter(self.agent_config)  # Subagent completer
+        self.subagent_completer = SubagentCompleter(self.agent_config)  # Subagent completer
 
         # Use merge_completers to combine completers
         from prompt_toolkit.completion import merge_completers
 
         return merge_completers(
             [
-                subagent_completer,  # Subagent completer (highest priority)
+                self.subagent_completer,  # Subagent completer (highest priority)
                 self.at_completer,  # @ reference completer
                 sql_completer,  # SQL keyword completer (lowest priority)
             ]
@@ -405,7 +410,7 @@ class DatusCLI:
 
             self.agent_commands.update_agent_reference()
             self._pre_load_storage()
-            self._workflow_runner = self.agent.create_workflow_runner()
+            self._workflow_runner = self._create_workflow_runner()
             # self.console.print("[dim]Agent initialized successfully in background[/]")
         except Exception as e:
             self.console.print(f"[bold red]Error:[/]Failed to initialize agent in background: {str(e)}")
@@ -886,6 +891,7 @@ class DatusCLI:
             ("!sl/!schema_linking", "Schema linking: show list of recommended tables and values"),
             ("!sm/!search_metrics", "Use natural language to search for corresponding metrics"),
             ("!sq/!search_sql", "Use natural language to search for reference SQL"),
+            ("!sd/!search_document", "Search platform documentation by keywords"),
             # ("!gen", "Generate SQL, optionally with table constraints"),
             # ("!fix <description>", "Fix the last SQL query"),
             ("!save", "Save the last result to a file"),
@@ -1019,29 +1025,71 @@ Type '.help' for a list of commands or '.exit' to quit.
             self.console, message, default=default, choices=choices, multiline=multiline, style=self.session.style
         )
 
-    def _init_connection(self):
-        """Initialize database connection."""
+    def _init_connection(self, timeout_seconds: int = 30):
+        """Initialize database connection with timeout control.
+
+        Args:
+            timeout_seconds: Maximum time to wait for connection (default: 30 seconds)
+        """
         current_namespace = self.agent_config.current_namespace
-        if not self.cli_context.current_db_name:
-            db_name, self.db_connector = self.db_manager.first_conn_with_name(current_namespace)
+
+        def _do_init_connection():
+            """Inner function to perform connection initialization."""
+            if not self.cli_context.current_db_name:
+                db_name, connector = self.db_manager.first_conn_with_name(current_namespace)
+                return db_name, connector
+            else:
+                connector = self.db_manager.get_conn(current_namespace, self.cli_context.current_db_name)
+                return self.cli_context.current_db_name, connector
+
+        try:
+            # Use ThreadPoolExecutor with timeout for connection initialization
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_do_init_connection)
+                try:
+                    db_name, self.db_connector = future.result(timeout=timeout_seconds)
+                except FuturesTimeoutError:
+                    self.console.print(
+                        f"[bold red]Error:[/] Database connection timed out after {timeout_seconds} seconds. "
+                        f"Please check if the database server for namespace '{current_namespace}' is running "
+                        "and accessible."
+                    )
+                    logger.error(f"Database connection timeout for namespace: {current_namespace}")
+                    self.db_connector = None
+                    return
+
+            if not self.db_connector:
+                self.console.print("[bold red]Error:[/] No database connection.")
+                return
+
+            # Update context based on dialect
             if self.db_connector.dialect in (DBType.SQLITE, DBType.DUCKDB):
                 self.cli_context.update_database_context(db_name=self.db_connector.database_name, db_logic_name=db_name)
             else:
                 self.cli_context.update_database_context(
                     catalog=self.db_connector.catalog_name,
                     db_name=self.db_connector.database_name,
-                    db_logic_name=db_name or self.db_connector.database_name or self.agent_config.current_namespace,
+                    db_logic_name=db_name or self.db_connector.database_name or current_namespace,
                 )
-        else:
-            self.db_connector = self.db_manager.get_conn(current_namespace, self.cli_context.current_db_name)
-            if self.db_connector.dialect in (DBType.SQLITE, DBType.DUCKDB):
-                self.cli_context.update_database_context(
-                    db_name=self.db_connector.database_name, db_logic_name=self.cli_context.current_db_name
-                )
-        if not self.db_connector:
-            self.console.print("[bold red]Error:[/] No database connection.")
-            return
 
-        # Test the connection, ff there is an exception, it will be handled by unified exception handling.
-        connection_result = self.db_connector.test_connection()
-        logger.debug(f"Connection test result: {connection_result}")
+            # Test the connection with timeout
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.db_connector.test_connection)
+                try:
+                    connection_result = future.result(timeout=timeout_seconds)
+                    logger.debug(f"Connection test result: {connection_result}")
+                except FuturesTimeoutError:
+                    self.console.print(
+                        f"[bold red]Error:[/] Connection test timed out after {timeout_seconds} seconds. "
+                        f"The database server for namespace '{current_namespace}' may be unresponsive."
+                    )
+                    logger.error(f"Connection test timeout for namespace: {current_namespace}")
+                    self.db_connector = None
+
+        except Exception as e:
+            self.console.print(f"[bold red]Error:[/] Failed to connect to database: {str(e)}")
+            logger.error(f"Database connection failed for namespace {current_namespace}: {e}")
+            self.db_connector = None
+
+    def _create_workflow_runner(self) -> WorkflowRunner:
+        return self.agent.create_workflow_runner(run_id=datetime.now().strftime("%Y%m%d"))

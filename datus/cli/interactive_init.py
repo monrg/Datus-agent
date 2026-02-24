@@ -9,6 +9,7 @@ Interactive initialization command for Datus Agent.
 This module provides an interactive CLI for setting up the basic configuration
 without requiring users to manually write conf/agent.yml files.
 """
+
 import os
 import shutil
 import sys
@@ -26,6 +27,7 @@ from datus.cli.init_util import detect_db_connectivity
 from datus.configuration.agent_config import AgentConfig
 from datus.utils.loggings import configure_logging, get_logger, print_rich_exception
 from datus.utils.path_manager import get_path_manager
+from datus.utils.path_utils import safe_rmtree
 from datus.utils.resource_utils import copy_data_file, read_data_file_text
 
 logger = get_logger(__name__)
@@ -170,30 +172,43 @@ class InteractiveInit:
                 "type": "openai",
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4.1",
-                "options": ["gpt-4o", "gpt-4.1", "o3", "o4-mini", "gpt-5"],
+                "options": ["gpt-5.2", "gpt-4.1", "gpt-4.1-mini", "o3", "o3-pro", "o4-mini"],
             },
             "deepseek": {
                 "type": "deepseek",
                 "base_url": "https://api.deepseek.com",
                 "model": "deepseek-chat",
+                "options": ["deepseek-chat", "deepseek-reasoner"],
             },
             "claude": {
                 "type": "claude",
                 "base_url": "https://api.anthropic.com",
-                "model": "claude-haiku-4-5",
-                "options": ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-1", "claude-opus-4"],
+                "model": "claude-sonnet-4-5",
+                "options": [
+                    "claude-haiku-4-5",
+                    "claude-sonnet-4-5",
+                    "claude-opus-4-5",
+                    "claude-sonnet-4",
+                    "claude-opus-4",
+                ],
             },
             "kimi": {
-                "type": "openai",
+                "type": "kimi",
                 "base_url": "https://api.moonshot.cn/v1",
-                "model": "kimi-k2-turbo-preview",
-                "options": ["kimi-k2", "kimi-k2-turbo-preview"],
+                "model": "kimi-k2.5",
+                "options": ["kimi-k2.5", "kimi-k2-turbo-preview", "kimi-k2-0905-Preview", "kimi-k2-thinking"],
             },
             "qwen": {
                 "type": "openai",
                 "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "model": "qwen-plus",
-                "options": ["qwen3-max", "qwen3-coder", "qwen-plus", "qwen-flash"],
+                "model": "qwen3-max",
+                "options": ["qwen3-max", "qwen3-coder-plus", "qwen-plus", "qwen-flash"],
+            },
+            "gemini": {
+                "type": "gemini",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "model": "gemini-2.5-flash",
+                "options": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3-pro-preview"],
             },
         }
 
@@ -379,7 +394,7 @@ class InteractiveInit:
         if Confirm.ask("- Initialize reference SQL from workspace?", default=False):
             default_sql_dir = str(Path(self.workspace_path) / "reference_sql")
             sql_dir = Prompt.ask("- Enter SQL directory path to scan", default=default_sql_dir)
-            init_sql_and_log_result(
+            overwrite_sql_and_log_result(
                 namespace_name=self.namespace_name, sql_dir=sql_dir, config_path=config_path, console=self.console
             )
 
@@ -445,6 +460,7 @@ class InteractiveInit:
                 "claude": "ClaudeModel",
                 "qwen": "QwenModel",
                 "gemini": "GeminiModel",
+                "kimi": "KimiModel",
             }
 
             if model_type not in type_map:
@@ -678,12 +694,13 @@ def init_metadata_and_log_result(namespace_name: str, config_path: str, console:
             print_rich_exception(console, e, "Metadata initialization failed", logger)
 
 
-def init_sql_and_log_result(
+def overwrite_sql_and_log_result(
     namespace_name: str,
     sql_dir: str,
     config_path: str,
     subject_tree: Optional[str] = None,
     console: Optional[Console] = None,
+    force: bool = False,
 ):
     if not console:
         console = Console(log_path=False)
@@ -692,7 +709,7 @@ def init_sql_and_log_result(
     try:
         agent_config = load_agent_config(reload=True, config=config_path)
         agent_config.current_namespace = namespace_name
-        do_init_sql_and_log_result(agent_config, sql_dir, subject_tree, console)
+        do_init_sql_and_log_result(agent_config, sql_dir, subject_tree, console, force=force)
     except Exception as e:
         print_rich_exception(console, e, "Reference SQL initialization failed", logger)
 
@@ -703,6 +720,7 @@ def do_init_sql_and_log_result(
     subject_tree: Optional[str] = None,
     console: Optional[Console] = None,
     kb_update_strategy: str = "overwrite",
+    force: bool = False,
 ):
     from datus.storage.reference_sql.reference_sql_init import init_reference_sql
     from datus.storage.reference_sql.store import ReferenceSqlRAG
@@ -737,9 +755,9 @@ def do_init_sql_and_log_result(
 
             path_manager = get_path_manager(datus_home=agent_config.home)
             sql_summary_dir = path_manager.sql_summary_path(agent_config.current_namespace)
-            if sql_summary_dir.exists():
-                shutil.rmtree(sql_summary_dir)
-                logger.info(f"Deleted existing SQL summary directory {sql_summary_dir}")
+            if sql_summary_dir.exists() and not safe_rmtree(sql_summary_dir, "SQL summary directory", force=force):
+                console.print("[yellow]Cancelled by user[/yellow]")
+                return False, None
             agent_config.save_storage_config("reference_sql")
         else:
             agent_config.check_init_storage_config("reference_sql")

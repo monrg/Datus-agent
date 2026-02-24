@@ -8,6 +8,7 @@ ChatAgenticNode implementation for flexible CLI chat interactions.
 This module provides a concrete implementation of GenSQLAgenticNode specifically
 designed for chat interactions with database and filesystem tool support.
 """
+
 from typing import AsyncGenerator, Optional, override
 
 from datus.agent.node.gen_sql_agentic_node import GenSQLAgenticNode
@@ -17,6 +18,10 @@ from datus.schemas.action_history import ActionHistory, ActionHistoryManager, Ac
 from datus.schemas.chat_agentic_node_models import ChatNodeInput, ChatNodeResult
 from datus.tools.db_tools.db_manager import db_manager_instance
 from datus.tools.func_tool import ContextSearchTools, DBFuncTool
+from datus.tools.permission.permission_hooks import CompositeHooks, PermissionHooks
+from datus.tools.permission.permission_manager import PermissionManager
+from datus.tools.skill_tools.skill_func_tool import SkillFuncTool
+from datus.tools.skill_tools.skill_manager import SkillManager
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
@@ -53,6 +58,12 @@ class ChatAgenticNode(GenSQLAgenticNode):
             agent_config: Agent configuration
             tools: List of tools (will be populated in setup_tools)
         """
+        # Initialize ChatAgenticNode-specific attributes BEFORE calling parent constructor
+        # This is required because parent's __init__ calls setup_tools()
+        # Note: permission_manager and skill_manager are initialized by parent AgenticNode
+        self.skill_func_tool: Optional[SkillFuncTool] = None
+        self.permission_hooks: Optional[PermissionHooks] = None
+
         # Call parent constructor with node_name="chat"
         # This will initialize max_turns, tool attributes, plan mode attributes, and MCP servers
         super().__init__(
@@ -170,7 +181,197 @@ class ChatAgenticNode(GenSQLAgenticNode):
         self.context_search_tools = ContextSearchTools(self.agent_config)
         self._setup_date_parsing_tools()
         self._setup_filesystem_tools()
+        self._setup_skill_tools()
         self._rebuild_tools()
+        self._setup_platform_doc_tools()
+
+        # Setup permission hooks after all tools are initialized
+        self._setup_permission_hooks()
+
+    def _setup_skill_tools(self):
+        """Setup skill discovery and loading tools with permission control."""
+        try:
+            # Build permission config with default ASK rule for skill bash execution.
+            # Prepend (lowest priority) so user-configured rules can override.
+            from datus.tools.permission.permission_config import PermissionConfig, PermissionLevel, PermissionRule
+
+            base_config = self.agent_config.permissions_config
+            if base_config is not None:
+                base_config = base_config.model_copy(deep=True)
+            else:
+                base_config = PermissionConfig()
+
+            # Add default ASK for skill_execute_command (bash) at position 0 (lowest priority)
+            has_bash_rule = any(r.tool == "skills" and r.pattern == "skill_execute_command" for r in base_config.rules)
+            if not has_bash_rule:
+                base_config.rules.insert(
+                    0,
+                    PermissionRule(
+                        tool="skills",
+                        pattern="skill_execute_command",
+                        permission=PermissionLevel.ASK,
+                    ),
+                )
+
+            # Create PermissionManager from agent config
+            self.permission_manager = PermissionManager(
+                global_config=base_config,
+                node_overrides=self._get_node_permission_overrides(),
+            )
+
+            # Set permission callback for ASK permissions (legacy callback, for backward compatibility)
+            self.permission_manager.set_permission_callback(self._handle_permission_ask)
+
+            # Create SkillManager with permission support
+            self.skill_manager = SkillManager(
+                permission_manager=self.permission_manager,
+            )
+            self.skill_func_tool = SkillFuncTool(
+                manager=self.skill_manager,
+                node_name="chat",
+            )
+            logger.debug(f"Setup skill tools: {self.skill_manager.get_skill_count()} skills discovered")
+        except Exception as e:
+            logger.error(f"Failed to setup skill tools: {e}")
+
+    def _setup_permission_hooks(self):
+        """Setup permission hooks and register all tool categories.
+
+        Creates PermissionHooks instance and registers all available tools
+        with their respective categories for unified permission checking.
+        Uses the InteractionBroker pattern for async user interactions.
+        """
+        if not self.permission_manager:
+            logger.debug("No permission manager available, skipping permission hooks setup")
+            return
+
+        try:
+            # Get the interaction broker from parent class
+            broker = self._get_or_create_broker()
+
+            self.permission_hooks = PermissionHooks(
+                broker=broker,
+                permission_manager=self.permission_manager,
+                node_name=self.get_node_name(),
+            )
+
+            # Register tools by category (follows existing FuncTool structure)
+            if self.db_func_tool:
+                self.permission_hooks.register_tools("db_tools", self.db_func_tool.available_tools())
+            if self.context_search_tools:
+                self.permission_hooks.register_tools(
+                    "context_search_tools", self.context_search_tools.available_tools()
+                )
+            if self.date_parsing_tools:
+                self.permission_hooks.register_tools("date_parsing_tools", self.date_parsing_tools.available_tools())
+            if self.filesystem_func_tool:
+                self.permission_hooks.register_tools("filesystem_tools", self.filesystem_func_tool.available_tools())
+            if self.skill_func_tool:
+                self.permission_hooks.register_tools("skills", self.skill_func_tool.available_tools())
+
+            logger.debug(f"Permission hooks setup with {len(self.permission_hooks.tool_registry)} registered tools")
+        except Exception as e:
+            logger.error(f"Failed to setup permission hooks: {e}")
+            self.permission_hooks = None
+
+    async def _handle_permission_ask(
+        self,
+        tool_category: str,
+        tool_name: str,
+        context: dict,
+    ) -> bool:
+        """Handle ASK permission by prompting user for confirmation.
+
+        Args:
+            tool_category: Category of the tool (e.g., "skills")
+            tool_name: Name of the tool/skill
+            context: Additional context about the request
+
+        Returns:
+            True if user approved, False otherwise
+        """
+        try:
+            from rich.console import Console
+            from rich.prompt import Confirm
+
+            console = Console()
+            console.print(f"\n[yellow]Permission required:[/yellow] {tool_category}.{tool_name}")
+            if context:
+                console.print(f"[dim]Context: {context}[/dim]")
+
+            approved = Confirm.ask(f"Allow {tool_name}?", default=False)
+
+            if approved:
+                # Ask if user wants to approve for the entire session
+                always = Confirm.ask("Always allow this session?", default=False)
+                if always and self.permission_manager:
+                    self.permission_manager.approve_for_session(tool_category, tool_name)
+
+            return approved
+        except Exception as e:
+            logger.error(f"Permission prompt failed: {e}")
+            return False
+
+    def _get_node_permission_overrides(self) -> dict:
+        """Get node-specific permission overrides from agent config.
+
+        Returns:
+            Dictionary of node_name -> PermissionConfig
+        """
+        # Check if agent config has node-specific permission overrides
+        if not self.agent_config:
+            return {}
+
+        # Look for permission overrides in agentic_nodes config
+        chat_config = self.agent_config.agentic_nodes.get("chat", {})
+        if isinstance(chat_config, dict) and "permissions" in chat_config:
+            return {"chat": chat_config["permissions"]}
+
+        return {}
+
+    @override
+    def _get_execution_config(self, execution_mode: str, original_input) -> dict:
+        """Get execution configuration with permission hooks for all tools.
+
+        Overrides parent to add unified permission hooks that check permissions
+        before executing any tool (db_tools, skills, MCP, filesystem, etc.).
+
+        Args:
+            execution_mode: "normal" or "plan"
+            original_input: Original chat input for context
+
+        Returns:
+            Configuration dict with tools, instruction, and hooks
+        """
+        # Get base config from parent
+        config = super()._get_execution_config(execution_mode, original_input)
+
+        # Add permission hooks if available
+        if self.permission_hooks:
+            existing_hooks = config.get("hooks")
+            if existing_hooks:
+                # Combine with existing hooks (e.g., PlanModeHooks)
+                config["hooks"] = CompositeHooks([existing_hooks, self.permission_hooks])
+            else:
+                config["hooks"] = self.permission_hooks
+
+        return config
+
+    @override
+    def _rebuild_tools(self):
+        """Rebuild the tools list with current tool instances including skills."""
+        self.tools = []
+        if self.db_func_tool:
+            self.tools.extend(self.db_func_tool.available_tools())
+        if self.context_search_tools:
+            self.tools.extend(self.context_search_tools.available_tools())
+        if self.date_parsing_tools:
+            self.tools.extend(self.date_parsing_tools.available_tools())
+        if self.filesystem_func_tool:
+            self.tools.extend(self.filesystem_func_tool.available_tools())
+        # Add skill tools
+        if self.skill_func_tool:
+            self.tools.extend(self.skill_func_tool.available_tools())
 
     async def execute_stream(
         self, action_history_manager: Optional[ActionHistoryManager] = None
@@ -199,19 +400,17 @@ class ChatAgenticNode(GenSQLAgenticNode):
         if is_plan_mode:
             self.plan_mode_active = True
 
-            # Create plan mode hooks
-            from rich.console import Console
-
+            # Create plan mode hooks with interaction broker
             from datus.cli.plan_hooks import PlanModeHooks
 
-            console = Console()
+            broker = self._get_or_create_broker()
             session = self._get_or_create_session()[0]
 
             # Workflow sets 'auto_execute_plan' in metadata, CLI REPL does not
             auto_mode = getattr(user_input, "auto_execute_plan", False)
             logger.info(f"Plan mode auto_mode: {auto_mode} (from input)")
 
-            self.plan_hooks = PlanModeHooks(console=console, session=session, auto_mode=auto_mode)
+            self.plan_hooks = PlanModeHooks(broker=broker, session=session, auto_mode=auto_mode)
 
         # Create initial action
         action_type = "plan_mode_interaction" if is_plan_mode else "chat_interaction"
@@ -231,10 +430,6 @@ class ChatAgenticNode(GenSQLAgenticNode):
 
             # Get or create session and any available summary
             session, conversation_summary = self._get_or_create_session()
-
-            # Get system instruction from template, passing summary and prompt version if available
-            prompt_version = user_input.prompt_version or self.node_config.get("prompt_version")
-            system_instruction = self._get_system_prompt(conversation_summary, prompt_version)
 
             # Add database context to user message if provided
             from datus.agent.node.gen_sql_agentic_node import build_enhanced_message
@@ -256,17 +451,6 @@ class ChatAgenticNode(GenSQLAgenticNode):
             sql_content = None
             tokens_used = 0
             last_successful_output = None
-
-            # Create assistant action for processing
-            assistant_action = ActionHistory.create_action(
-                role=ActionRole.ASSISTANT,
-                action_type="llm_generation",
-                messages="Generating response with tools...",
-                input_data={"prompt": enhanced_message, "system": system_instruction},
-                status=ActionStatus.PROCESSING,
-            )
-            action_history_manager.add_action(assistant_action)
-            yield assistant_action
 
             # Determine execution mode and start unified recursive execution
             execution_mode = "plan" if is_plan_mode and self.plan_hooks else "normal"

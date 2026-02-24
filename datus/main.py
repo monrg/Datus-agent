@@ -11,6 +11,7 @@ from datetime import datetime
 
 from datus.cli.namespace_manager import NamespaceManager
 from datus.cli.tutorial import BenchmarkTutorial
+from datus.multi_round_benchmark import multi_benchmark, setup_base_parser_args
 from datus.utils.async_utils import setup_windows_policy
 
 # Add path fixing to ensure proper imports
@@ -111,7 +112,6 @@ def create_parser() -> argparse.ArgumentParser:
             "metadata",
             "semantic_model",
             "table_lineage",
-            "document",
             "ext_knowledge",
             "reference_sql",
         ],
@@ -178,6 +178,105 @@ def create_parser() -> argparse.ArgumentParser:
         "If provided, only these predefined categories can be used. "
         "If not provided, existing categories from LanceDB will be reused or new ones created.",
     )
+    bootstrap_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts and automatically confirm deletions (useful for CI/CD)",
+    )
+
+    # platform-doc command
+    platform_doc_parser = subparsers.add_parser(
+        "platform-doc",
+        help="Initialize platform documentation",
+        parents=[global_parser],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    platform_doc_parser.add_argument(
+        "--platform",
+        type=str,
+        help="Platform name for documents (e.g., snowflake, postgresql, starrocks, polaris)",
+    )
+    platform_doc_parser.add_argument(
+        "--version",
+        type=str,
+        help="Specific version for documents (auto-detected if not provided)",
+    )
+    platform_doc_parser.add_argument(
+        "--update_strategy",
+        "--update-strategy",
+        type=str,
+        choices=["check", "overwrite"],
+        default="check",
+        help="Documentation update strategy: check (verify status) or overwrite (re-import)",
+    )
+    platform_doc_parser.add_argument(
+        "--pool_size",
+        "--pool-size",
+        type=int,
+        default=4,
+        help="Number of threads to initialize platform-doc, default is 4",
+    )
+    platform_doc_parser.add_argument(
+        "--source",
+        type=str,
+        help="Source location for documents (GitHub repo 'owner/repo', website URL, or local path)",
+    )
+    platform_doc_parser.add_argument(
+        "--source-type",
+        type=str,
+        choices=["github", "website", "local"],
+        default=None,
+        help="Source type for documents (default: local). "
+        "Supported file types — local/github: .md, .markdown, .html, .htm, .rst, .txt; "
+        "website: HTML pages only.",
+    )
+    platform_doc_parser.add_argument(
+        "--github-ref",
+        type=str,
+        default=None,
+        help="Git ref (branch or tag) to fetch from for GitHub source type. "
+        "Examples: '3.4.0' (tag), 'versioned-docs' (branch). "
+        "If omitted, fetches from the default branch.",
+    )
+    platform_doc_parser.add_argument(
+        "--paths",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Paths to fetch for GitHub source type (default: docs README.md)",
+    )
+    platform_doc_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=None,
+        help="Target chunk size in characters for document splitting (default: 1024). "
+        "This is a soft limit: individual paragraphs and code blocks may exceed it "
+        "(up to the hard max of 2048 chars) to preserve semantic integrity. "
+        "Chunks smaller than 256 chars are automatically merged with neighbors. "
+        "Larger values produce fewer, coarser chunks; smaller values produce more, finer-grained chunks. "
+        "Recommended range: 512-2048.",
+    )
+    platform_doc_parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum crawl depth for website source type (default: 1)",
+    )
+    platform_doc_parser.add_argument(
+        "--include-patterns",
+        type=str,
+        nargs="+",
+        default=None,
+        help="File/URL patterns to include (e.g., '*.md' for local, regex for website)",
+    )
+    platform_doc_parser.add_argument(
+        "--exclude-patterns",
+        type=str,
+        nargs="+",
+        default=None,
+        help="File/URL patterns to exclude (e.g., 'CHANGELOG.md' for local, regex for website)",
+    )
 
     # benchmark command
     benchmark_parser = subparsers.add_parser(
@@ -223,6 +322,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--plan-mode",
         action="store_true",
         help="Enable plan mode for benchmark execution (generates plan then auto-executes without confirmation)",
+    )
+    benchmark_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts and automatically confirm deletions (useful for CI/CD)",
     )
 
     # generate-dataset command
@@ -323,6 +428,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     bi_subparser.add_argument("--namespace", type=str, required=True, help="Database namespace")
 
+    multi_benchmark_parser = subparsers.add_parser(
+        "multi-round-benchmark", parents=[global_parser], help="Multi-round benchmarking"
+    )
+    setup_base_parser_args(multi_benchmark_parser)
+
     # tutorial command
     subparsers.add_parser(
         "tutorial",
@@ -399,6 +509,10 @@ def main():
     configure_logging(args.debug)
     setup_exception_handler()
 
+    if args.action == "multi-round-benchmark":
+        multi_benchmark(args)
+        return 0
+
     # Load agent configuration
     agent_config = load_agent_config(**vars(args))
     if args.action == "bootstrap-bi":
@@ -406,6 +520,13 @@ def main():
         from datus.cli.bi_dashboard import BiDashboardCommands
 
         return BiDashboardCommands(agent_config).cmd()
+
+    if args.action == "platform-doc":
+        # platform-doc is namespace-independent; handled before Agent init
+        from datus.agent.agent import bootstrap_platform_doc
+
+        bootstrap_platform_doc(args, agent_config)
+        return 0
 
     # Initialize agent with both args and config
     agent = Agent(args, agent_config)

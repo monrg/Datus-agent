@@ -20,7 +20,7 @@ from datus.schemas.agent_models import SubAgentConfig
 from datus.schemas.gen_sql_agentic_node_models import GenSQLNodeInput, GenSQLNodeResult
 from datus.schemas.node_models import Metric, ReferenceSql, TableSchema
 from datus.tools.db_tools.db_manager import db_manager_instance
-from datus.tools.func_tool import ContextSearchTools, DBFuncTool, FilesystemFuncTool
+from datus.tools.func_tool import ContextSearchTools, DBFuncTool, FilesystemFuncTool, PlatformDocSearchTool
 from datus.tools.func_tool.date_parsing_tools import DateParsingTools
 from datus.tools.mcp_tools import MCPServer
 from datus.utils.exceptions import DatusException, ErrorCode
@@ -80,6 +80,7 @@ class GenSQLAgenticNode(AgenticNode):
         self.context_search_tools: Optional[ContextSearchTools] = None
         self.date_parsing_tools: Optional[DateParsingTools] = None
         self.filesystem_func_tool: Optional[FilesystemFuncTool] = None
+        self._platform_doc_tool: Optional[PlatformDocSearchTool] = None
 
         # Initialize plan mode attributes
         self.plan_mode_active = False
@@ -169,6 +170,11 @@ class GenSQLAgenticNode(AgenticNode):
             self.input.plan_mode = plan_mode
             self.input.auto_execute_plan = auto_execute_plan
 
+        # Set reference date for date parsing tools if configured
+        # Always call set_reference_date to clear previous state even when current_date is None
+        if self.date_parsing_tools:
+            self.date_parsing_tools.set_reference_date(workflow.task.current_date)
+
         return {"success": True, "message": "GenSQL input prepared from workflow"}
 
     def _update_database_connection(self, database_name: str):
@@ -198,6 +204,8 @@ class GenSQLAgenticNode(AgenticNode):
             self.tools.extend(self.date_parsing_tools.available_tools())
         if self.filesystem_func_tool:
             self.tools.extend(self.filesystem_func_tool.available_tools())
+        if self._platform_doc_tool:
+            self.tools.extend(self._platform_doc_tool.available_tools())
 
     def setup_tools(self):
         """Setup tools based on configuration."""
@@ -214,6 +222,14 @@ class GenSQLAgenticNode(AgenticNode):
             self._setup_tool_pattern(pattern)
 
         logger.debug(f"Setup {len(self.tools)} tools: {[tool.name for tool in self.tools]}")
+
+    def _setup_platform_doc_tools(self):
+        """Setup tools based on configuration."""
+        try:
+            self._platform_doc_tool = PlatformDocSearchTool(self.agent_config)
+            self.tools.extend(self._platform_doc_tool.available_tools())
+        except Exception as e:
+            logger.error(f"Failed to setup platform_doc_search tools: {e}")
 
     def _setup_db_tools(self):
         """Setup database tools."""
@@ -271,6 +287,8 @@ class GenSQLAgenticNode(AgenticNode):
                     self._setup_date_parsing_tools()
                 elif base_type == "filesystem_tools":
                     self._setup_filesystem_tools()
+                elif base_type == "platform_doc_tools":
+                    self._setup_platform_doc_tools()
                 else:
                     logger.warning(f"Unknown tool type: {base_type}")
 
@@ -283,6 +301,8 @@ class GenSQLAgenticNode(AgenticNode):
                 self._setup_date_parsing_tools()
             elif pattern == "filesystem_tools":
                 self._setup_filesystem_tools()
+            elif pattern == "platform_doc_tools":
+                self._setup_platform_doc_tools()
 
             # Handle specific method patterns (e.g., "db_tools.list_tables")
             elif "." in pattern:
@@ -321,6 +341,10 @@ class GenSQLAgenticNode(AgenticNode):
                     root_path = self._resolve_workspace_root()
                     self.filesystem_func_tool = FilesystemFuncTool(root_path=root_path)
                 tool_instance = self.filesystem_func_tool
+            elif tool_type == "platform_doc_tools":
+                if not self._platform_doc_tool:
+                    self._platform_doc_tool = PlatformDocSearchTool(self.agent_config)
+                tool_instance = self._platform_doc_tool
             else:
                 logger.warning(f"Unknown tool type: {tool_type}")
                 return
@@ -446,6 +470,7 @@ class GenSQLAgenticNode(AgenticNode):
             has_mf_tools=any("metricflow" in k for k in self.mcp_servers.keys()),
             has_context_search_tools=bool(self.context_search_tools),
             has_parsing_tools=bool(self.date_parsing_tools),
+            has_platform_doc_tools=bool(self._platform_doc_tool),
             agent_config=self.agent_config,
             workspace_root=self._resolve_workspace_root(),
         )
@@ -459,12 +484,14 @@ class GenSQLAgenticNode(AgenticNode):
         from datus.prompts.prompt_manager import prompt_manager
 
         try:
-            return prompt_manager.render_template(template_name=template_name, version=prompt_version, **context)
+            base_prompt = prompt_manager.render_template(template_name=template_name, version=prompt_version, **context)
+            return self._finalize_system_prompt(base_prompt)
 
         except FileNotFoundError:
             # Template not found - throw DatusException
             logger.warning(f"Failed to render system prompt '{system_prompt_name}', using the default template instead")
-            return prompt_manager.render_template(template_name="sql_system", version=prompt_version, **context)
+            base_prompt = prompt_manager.render_template(template_name="sql_system", version=None, **context)
+            return self._finalize_system_prompt(base_prompt)
         except Exception as e:
             # Other template errors - wrap in DatusException
             logger.error(f"Template loading error for '{template_name}': {e}")
@@ -522,15 +549,12 @@ class GenSQLAgenticNode(AgenticNode):
             is_plan_mode = getattr(user_input, "plan_mode", False)
             if is_plan_mode:
                 self.plan_mode_active = True
-                from rich.console import Console
-
                 from datus.cli.plan_hooks import PlanModeHooks
 
+                broker = self._get_or_create_broker()
                 auto_mode = getattr(user_input, "auto_execute_plan", False)
-                self.plan_hooks = PlanModeHooks(console=Console(), session=session, auto_mode=auto_mode)
+                self.plan_hooks = PlanModeHooks(broker=broker, session=session, auto_mode=auto_mode)
                 logger.info(f"Plan mode activated (auto_mode={auto_mode})")
-
-            system_instruction = self._get_system_prompt(conversation_summary, user_input.prompt_version)
 
             # Add context to user message if provided
             enhanced_message = build_enhanced_message(
@@ -550,17 +574,6 @@ class GenSQLAgenticNode(AgenticNode):
             sql_content = None
             tokens_used = 0
             last_successful_output = None
-
-            # Create assistant action for processing
-            assistant_action = ActionHistory.create_action(
-                role=ActionRole.ASSISTANT,
-                action_type="llm_generation",
-                messages="Generating response with tools...",
-                input_data={"prompt": enhanced_message, "system": system_instruction},
-                status=ActionStatus.PROCESSING,
-            )
-            action_history_manager.add_action(assistant_action)
-            yield assistant_action
 
             logger.debug(f"Tools available : {len(self.tools)} tools - {[tool.name for tool in self.tools]}")
             logger.debug(f"MCP servers available : {len(self.mcp_servers)} servers - {list(self.mcp_servers.keys())}")
@@ -950,6 +963,7 @@ def prepare_template_context(
     has_mf_tools: bool = True,
     has_context_search_tools: bool = True,
     has_parsing_tools: bool = True,
+    has_platform_doc_tools: bool = False,
     agent_config: Optional[AgentConfig] = None,
     workspace_root: Optional[str] = None,
 ) -> dict:
@@ -963,6 +977,7 @@ def prepare_template_context(
         has_mf_tools: Whether MetricFlow MCP tools are available
         has_context_search_tools: Whether context search tools are available
         has_parsing_tools: Whether date parsing tools are available
+        has_platform_doc_tools: Whether platform documentation search tools are available
         agent_config: Agent configuration
         workspace_root: Workspace root path
 
@@ -975,6 +990,7 @@ def prepare_template_context(
         "has_mf_tools": has_mf_tools,
         "has_context_search_tools": has_context_search_tools,
         "has_parsing_tools": has_parsing_tools,
+        "has_platform_doc_tools": has_platform_doc_tools,
     }
     if not isinstance(node_config, SubAgentConfig):
         node_config = SubAgentConfig.model_validate(node_config)

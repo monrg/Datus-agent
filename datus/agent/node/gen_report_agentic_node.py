@@ -295,14 +295,16 @@ class GenReportAgenticNode(AgenticNode):
         from datus.prompts.prompt_manager import prompt_manager
 
         try:
-            return prompt_manager.render_template(template_name=template_name, version=version, **context)
+            base_prompt = prompt_manager.render_template(template_name=template_name, version=version, **context)
 
         except FileNotFoundError:
             # Template not found - use default gen_report template
             logger.warning(
                 f"Failed to render system prompt '{system_prompt_name}', using the default gen_report template"
             )
-            return prompt_manager.render_template(template_name="gen_report_system", version=version, **context)
+            base_prompt = prompt_manager.render_template(template_name="gen_report_system", version=version, **context)
+
+        return self._finalize_system_prompt(base_prompt)
 
     def _build_enhanced_message(self, user_input: GenReportNodeInput) -> str:
         """
@@ -459,17 +461,6 @@ class GenReportAgenticNode(AgenticNode):
             response_content = ""
             tokens_used = 0
             last_successful_output = None
-
-            # Create assistant action for processing
-            assistant_action = ActionHistory.create_action(
-                role=ActionRole.ASSISTANT,
-                action_type="llm_generation",
-                messages="Analyzing data and generating report...",
-                input_data={"prompt": enhanced_message, "system": system_instruction},
-                status=ActionStatus.PROCESSING,
-            )
-            action_history_manager.add_action(assistant_action)
-            yield assistant_action
 
             logger.debug(f"Tools available: {len(self.tools)} tools - {[tool.name for tool in self.tools]}")
 

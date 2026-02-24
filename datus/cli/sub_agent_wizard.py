@@ -33,10 +33,11 @@ from datus.agent.node.gen_sql_agentic_node import prepare_template_context
 from datus.cli.autocomplete import TableCompleter
 from datus.prompts.prompt_manager import prompt_manager
 from datus.schemas.agent_models import ScopedContext, SubAgentConfig
+from datus.tools.func_tool import PlatformDocSearchTool
 from datus.tools.mcp_tools import MCPTool
 from datus.utils.constants import SYS_SUB_AGENTS, DBType
 from datus.utils.loggings import get_logger
-from datus.utils.reference_paths import normalize_reference_path
+from datus.utils.reference_paths import normalize_reference_path, quote_path_segment, split_reference_path
 
 logger = get_logger(__name__)
 
@@ -1418,9 +1419,8 @@ class SubAgentWizard:
         """Validate current step's data."""
         if self.step == 0:
             name = self.name_buffer.text.strip()
-            description = self.description_area.text.strip()
-            if not name or not description:
-                self._show_error_dialog("Agent Name and Description are required.")
+            if not name:
+                self._show_error_dialog("Agent Name is required.")
                 return False
             if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
                 self._show_error_dialog(f"Invalid Agent Name: {name}. Must match: ^[a-zA-Z][a-zA-Z0-9_]*$")
@@ -1564,7 +1564,7 @@ class SubAgentWizard:
         self.data.mcp = ", ".join(mcp_parts)
         scoped_context: Dict[str, str] = {}
 
-        def _normalize_entries(entries: List[str]) -> List[str]:
+        def _normalize_table_entries(entries: List[str]) -> List[str]:
             normalized: List[str] = []
             for entry in entries:
                 normalized_entry = normalize_reference_path(entry)
@@ -1572,22 +1572,31 @@ class SubAgentWizard:
                     normalized.append(normalized_entry)
             return normalized
 
+        def _normalize_reference_entries(entries: List[str]) -> List[str]:
+            """Normalize metrics / reference-sql paths, preserving necessary quoting."""
+            normalized: List[str] = []
+            for entry in entries:
+                parts = split_reference_path(entry)
+                if parts:
+                    normalized.append(".".join(quote_path_segment(p) for p in parts))
+            return normalized
+
         table_entries = self.selected_tables or [
             line.strip() for line in self.catalogs_area.text.split("\n") if line.strip()
         ]
-        tables = _normalize_entries(table_entries)
+        tables = _normalize_table_entries(table_entries)
         if tables:
             scoped_context["tables"] = ", ".join(tables)
 
         metric_entries = self.selected_metrics or [
             line.strip() for line in self.metrics_area.text.split("\n") if line.strip()
         ]
-        metrics = _normalize_entries(metric_entries)
+        metrics = _normalize_reference_entries(metric_entries)
         if metrics:
             scoped_context["metrics"] = ", ".join(metrics)
 
         sql_entries = self.selected_sqls or [line.strip() for line in self.sqls_area.text.split("\n") if line.strip()]
-        sqls = _normalize_entries(sql_entries)
+        sqls = _normalize_reference_entries(sql_entries)
         if sqls:
             scoped_context["sqls"] = ", ".join(sqls)
 
@@ -1862,6 +1871,7 @@ class SubAgentWizard:
         return {
             "db_tools": DBFuncTool.all_tools_name(),
             "context_search_tools": ContextSearchTools.all_tools_name(),
+            "platform_doc_tools": PlatformDocSearchTool.all_tools_name(),
             "semantic_tools": SemanticTools.all_tools_name(),
             "date_parsing_tools": ["parse_temporal_expressions", "get_current_date"],
         }

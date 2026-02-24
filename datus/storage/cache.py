@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from datus.configuration.agent_config import AgentConfig
 from datus.schemas.agent_models import SubAgentConfig
 from datus.storage import BaseEmbeddingStore
+from datus.storage.backends.vector.factory import get_default_backend
 from datus.storage.document import DocumentStore
 from datus.storage.embedding_models import EmbeddingModel, get_embedding_model
 from datus.storage.ext_knowledge import ExtKnowledgeStore
@@ -19,7 +20,6 @@ from datus.storage.schema_metadata import SchemaStorage
 from datus.storage.schema_metadata.store import SchemaValueStorage
 from datus.storage.semantic_model.store import SemanticModelStorage
 from datus.storage.subject_tree.store import SubjectTreeStore
-from datus.storage.backends.vector.factory import get_default_backend
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
@@ -37,49 +37,45 @@ class StorageCacheHolder[T: BaseEmbeddingStore]:
         self,
         storage_factory: Callable[[str, EmbeddingModel], T],
         agent_config: AgentConfig,
-        storage_name: str,
+        embedding_model_conf_name: str,
         check_scope_attr: str,
         extra_kwargs_provider: Optional[Callable[[Optional[str]], dict]] = None,
     ):
         self.storage_factory = storage_factory
-        self.storage_name = storage_name
+        self.embedding_model_conf_name = embedding_model_conf_name
         self._agent_config = agent_config
         self.check_scope_attr = check_scope_attr
         self._extra_kwargs_provider = extra_kwargs_provider
-        self._instances = {}
+        self._instances: Dict[tuple[str, str, str], T] = {}
 
     def storage_instance(self, sub_agent_name: Optional[str] = None) -> T:
-        extra_kwargs = {}
-        if self._extra_kwargs_provider:
-            extra_kwargs.update(self._extra_kwargs_provider(sub_agent_name))
-        backend = get_default_backend(
-            self._agent_config.rag_storage_path()
-            if not sub_agent_name
-            else self._agent_config.sub_agent_storage_path(sub_agent_name),
-            agent_config=self._agent_config,
-        )
-        extra_kwargs.setdefault("backend", backend)
-
+        storage_path = self._agent_config.rag_storage_path()
         if sub_agent_name and (config := self._agent_config.sub_agent_config(sub_agent_name)):
             sub_agent_config = SubAgentConfig.model_validate(config)
             if sub_agent_config.has_scoped_context_by(self.check_scope_attr) and getattr(
                 sub_agent_config.scoped_context, self.check_scope_attr
             ):
-                logger.debug(
-                    (
-                        f"Sub agent {sub_agent_name} has a scope context,"
-                        f"so use {self._agent_config.sub_agent_storage_path(sub_agent_name)} for LanceDB"
-                    )
-                )
                 storage_path = self._agent_config.sub_agent_storage_path(sub_agent_name)
-                return self._get_or_create(storage_path, extra_kwargs)
-        return self._get_or_create(self._agent_config.rag_storage_path(), extra_kwargs)
+                logger.debug(f"Sub-agent {sub_agent_name} uses scoped storage path {storage_path}")
+
+        extra_kwargs = {}
+        if self._extra_kwargs_provider:
+            extra_kwargs.update(self._extra_kwargs_provider(sub_agent_name))
+        backend = get_default_backend(storage_path, agent_config=self._agent_config)
+        extra_kwargs.setdefault("backend", backend)
+
+        return self._get_or_create(storage_path, extra_kwargs)
 
     def _get_or_create(self, storage_path: str, extra_kwargs: dict) -> T:
-        cache_key = (storage_path, self.storage_name, getattr(extra_kwargs.get("backend"), "name", "default"))
+        backend_name = getattr(extra_kwargs.get("backend"), "name", "default")
+        cache_key = (storage_path, self.embedding_model_conf_name, backend_name)
         if cache_key in self._instances:
             return self._instances[cache_key]
-        instance = self.storage_factory(storage_path, get_embedding_model(self.storage_name), **extra_kwargs)
+        instance = self.storage_factory(
+            storage_path,
+            get_embedding_model(self.embedding_model_conf_name),
+            **extra_kwargs,
+        )
         self._instances[cache_key] = instance
         return instance
 
@@ -93,23 +89,17 @@ class StorageCacheHolder[T: BaseEmbeddingStore]:
 
 
 class StorageCache:
-    """Cache access to global and sub-agent storage instances.
+    """Cache access to global and sub-agent storage instances."""
 
-    Each storage accessor accepts an optional ``sub_agent_name``. When omitted, the accessor
-    returns the shared/global storage instance. When provided, a scoped storage rooted at the
-    sub-agent's knowledge base path is returned (and cached for subsequent calls).
-    """
-
-    def __init__(
-        self,
-        agent_config: AgentConfig,
-    ):
+    def __init__(self, agent_config: AgentConfig):
         self._agent_config = agent_config
         self._schema_holder = StorageCacheHolder(SchemaStorage, agent_config, "database", "tables")
         self._sample_data_holder = StorageCacheHolder(SchemaValueStorage, agent_config, "database", "tables")
-        self._semantic_holder = StorageCacheHolder(SemanticModelStorage, agent_config, "metric", "semantic_models")
+        self._semantic_holder = StorageCacheHolder(
+            SemanticModelStorage, agent_config, "semantic_model", "semantic_models"
+        )
         self._document_holder = StorageCacheHolder(DocumentStore, agent_config, "document", "")
-        self._subject_tree_store = None
+        self._subject_tree_store: Optional[SubjectTreeStore] = None
 
         def subject_tree_kwargs(_: Optional[str]) -> dict:
             return {"subject_tree_store": self.subject_tree_store()}
@@ -118,10 +108,10 @@ class StorageCache:
             MetricStorage, agent_config, "metric", "metrics", extra_kwargs_provider=subject_tree_kwargs
         )
         self._reference_sql_holder = StorageCacheHolder(
-            ReferenceSqlStorage, agent_config, "metric", "sqls", extra_kwargs_provider=subject_tree_kwargs
+            ReferenceSqlStorage, agent_config, "reference_sql", "sqls", extra_kwargs_provider=subject_tree_kwargs
         )
         self._ext_knowledge_holder = StorageCacheHolder(
-            ExtKnowledgeStore, agent_config, "document", "ext_knowledge", extra_kwargs_provider=subject_tree_kwargs
+            ExtKnowledgeStore, agent_config, "ext_knowledge", "ext_knowledge", extra_kwargs_provider=subject_tree_kwargs
         )
 
     def schema_storage(self, sub_agent_name: Optional[str] = None) -> SchemaStorage:
@@ -137,7 +127,6 @@ class StorageCache:
         return self.schema_value_storage(sub_agent_name)
 
     def metric_storage(self, sub_agent_name: Optional[str] = None) -> MetricStorage:
-        """Access dedicated MetricStorage for metrics only."""
         return self._metric_holder.storage_instance(sub_agent_name)
 
     def metrics_rag(self, sub_agent_name: Optional[str] = None) -> MetricStorage:
@@ -174,20 +163,7 @@ class StorageCache:
         return self._subject_tree_store
 
     def invalidate(self, sub_agent_name: Optional[str] = None) -> None:
-        if sub_agent_name:
-            storage_path = self._agent_config.sub_agent_storage_path(sub_agent_name)
-            for holder in (
-                self._schema_holder,
-                self._sample_data_holder,
-                self._semantic_holder,
-                self._document_holder,
-                self._metric_holder,
-                self._reference_sql_holder,
-                self._ext_knowledge_holder,
-            ):
-                holder.invalidate_path(storage_path)
-            return
-        for holder in (
+        holders = (
             self._schema_holder,
             self._sample_data_holder,
             self._semantic_holder,
@@ -195,7 +171,14 @@ class StorageCache:
             self._metric_holder,
             self._reference_sql_holder,
             self._ext_knowledge_holder,
-        ):
+        )
+        if sub_agent_name:
+            storage_path = self._agent_config.sub_agent_storage_path(sub_agent_name)
+            for holder in holders:
+                holder.invalidate_path(storage_path)
+            return
+
+        for holder in holders:
             holder.clear()
         self._subject_tree_store = None
 

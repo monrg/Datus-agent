@@ -11,7 +11,6 @@ from datus.tools.db_tools.db_manager import db_manager_instance
 from datus.tools.func_tool import DBFuncTool
 from datus.utils.json_utils import llm_result2json
 from datus.utils.loggings import get_logger
-from datus.utils.traceable_utils import optional_traceable
 
 logger = get_logger(__name__)
 
@@ -168,7 +167,6 @@ class CompareAgenticNode(AgenticNode):
         logger.debug(f"Unexpected comparison output type: {type(raw_output)}")
         return {}
 
-    @optional_traceable()
     async def execute_stream(
         self,
         action_history_manager: Optional[ActionHistoryManager] = None,
@@ -218,16 +216,6 @@ class CompareAgenticNode(AgenticNode):
                     f"New comparison request:\n{user_prompt}"
                 )
 
-            assistant_action = ActionHistory.create_action(
-                role=ActionRole.ASSISTANT,
-                action_type="llm_generation",
-                messages="Analyzing SQL comparison with tools...",
-                input_data={"prompt": user_prompt, "system": system_instruction},
-                status=ActionStatus.PROCESSING,
-            )
-            action_history_manager.add_action(assistant_action)
-            yield assistant_action
-
             response_content: Any = ""
             last_successful_output: Optional[Dict[str, Any]] = None
 
@@ -274,13 +262,6 @@ class CompareAgenticNode(AgenticNode):
                 explanation=result_dict.get("explanation", "No explanation provided"),
                 suggest=result_dict.get("suggest", "No suggestions provided"),
                 tokens_used=tokens_used,
-            )
-
-            action_history_manager.update_action_by_id(
-                assistant_action.action_id,
-                status=ActionStatus.SUCCESS,
-                output=result.model_dump(),
-                messages="Comparison completed successfully.",
             )
 
             self.actions.extend(action_history_manager.get_actions())
