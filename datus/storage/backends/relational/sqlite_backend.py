@@ -16,7 +16,6 @@ from datus.storage.backends.vector.interfaces import FilterExpr
 from datus.storage.backends.relational.filter_compiler import SQLFilterCompiler
 from datus.storage.backends.relational.interfaces import (
     ColumnSpec,
-    IndexSpec,
     RelationalCapabilities,
     TableSchema,
 )

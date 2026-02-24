@@ -6,19 +6,16 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (
     Any,
     Dict,
-    Iterator,
     List,
     Mapping,
     Optional,
     Protocol,
     Sequence,
     Tuple,
-    Union,
 )
 
 from datus.storage.backends.vector.interfaces import FilterExpr

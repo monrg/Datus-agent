@@ -8,7 +8,7 @@ import pyarrow as pa
 
 from datus.configuration.agent_config import AgentConfig
 from datus.storage.base import EmbeddingModel
-from datus.storage.subject_tree.store import BaseSubjectEmbeddingStore, base_schema_columns
+from datus.storage.subject_tree.store import BaseSubjectEmbeddingStore, SubjectTreeStore, base_schema_columns
 from datus.utils.loggings import get_logger
 
 logger = get_logger(__name__)
@@ -20,7 +20,7 @@ class ReferenceSqlStorage(BaseSubjectEmbeddingStore):
         db_path: str,
         embedding_model: EmbeddingModel,
         backend: Optional[Any] = None,
-        subject_tree_store: Optional["SubjectTreeStore"] = None,
+        subject_tree_store: Optional[SubjectTreeStore] = None,
     ):
         """Initialize the reference SQL store.
 
