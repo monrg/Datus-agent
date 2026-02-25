@@ -437,7 +437,6 @@ class SchemaWithValueRAG:
                 "table_type",
                 "definition",
             ],
-            limit=len(tables),
         )
         schemas_result = TableSchema.from_arrow(schema_results)
 
@@ -452,7 +451,6 @@ class SchemaWithValueRAG:
                 "table_type",
                 "sample_rows",
             ],
-            limit=len(tables),
         )
         values_result = TableValue.from_arrow(value_results)
 

@@ -798,6 +798,9 @@ class AgentConfig:
     def _build_postgres_connection_string(self, db_config: DbConfig) -> str:
         from urllib.parse import quote_plus
 
+        if db_config.uri:
+            return db_config.uri
+
         username = quote_plus(db_config.username or "")
         password = quote_plus(db_config.password or "")
         host = db_config.host or "127.0.0.1"

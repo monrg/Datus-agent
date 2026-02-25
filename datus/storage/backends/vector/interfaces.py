@@ -5,48 +5,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Mapping, Optional, Protocol, Sequence, Union
 
 import pyarrow as pa
 
-
-class Op(str, Enum):
-    EQ = "="
-    NE = "!="
-    GT = ">"
-    GTE = ">="
-    LT = "<"
-    LTE = "<="
-    IN = "IN"
-    LIKE = "LIKE"
+from datus.storage.lancedb_conditions import And, Condition, Not, Op, Or
 
 
-@dataclass(frozen=True)
-class Condition:
-    field: str
-    op: Op
-    value: Any
-
-
-@dataclass(frozen=True)
-class And:
-    nodes: Sequence["FilterExpr"]
-
-
-@dataclass(frozen=True)
-class Or:
-    nodes: Sequence["FilterExpr"]
-
-
-@dataclass(frozen=True)
-class Not:
-    node: "FilterExpr"
-
-
-# NOTE: FilterExpr is intentionally flexible for now so existing
-# lancedb_conditions nodes can be passed through during migration.
-FilterExpr = Union[Condition, And, Or, Not, Any]
+# Reuse the canonical condition AST in lancedb_conditions to avoid duplicate classes.
+FilterExpr = Union[Condition, And, Or, Not, str, Any]
 
 
 class FilterCompiler(Protocol):

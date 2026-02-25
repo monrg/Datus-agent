@@ -7,12 +7,14 @@ from __future__ import annotations
 from typing import Optional
 
 from datus.storage.backends.vector.interfaces import VectorBackend
-from datus.storage.backends.vector.lance import LanceBackend
 from datus.storage.backends.vector.registry import get_vector_backend
 
 
 def _build_pg_connection_string(db_config) -> str:
     from urllib.parse import quote_plus
+
+    if getattr(db_config, "uri", ""):
+        return db_config.uri
 
     username = quote_plus(db_config.username or "")
     password = quote_plus(db_config.password or "")
@@ -26,22 +28,35 @@ def _build_pg_connection_string(db_config) -> str:
 
 
 def get_default_backend(db_path: str, agent_config: Optional[object] = None) -> VectorBackend:
+    def build_lance_backend() -> VectorBackend:
+        from datus.storage.backends.vector.lance import LanceBackend
+
+        return LanceBackend(db_path)
+
     if agent_config is not None:
-        namespace = getattr(agent_config, "storage_backend_namespace", None)
-        if callable(namespace):
-            namespace_name = agent_config.storage_backend_namespace("vector")
+        namespace_fn = getattr(agent_config, "storage_backend_namespace", None)
+        resolve_db_config_fn = getattr(agent_config, "resolve_storage_db_config", None)
+        if callable(namespace_fn) and callable(resolve_db_config_fn):
+            try:
+                namespace_name = namespace_fn("vector")
+            except Exception:
+                namespace_name = None
             if namespace_name:
-                db_config = agent_config.resolve_storage_db_config("vector")
+                try:
+                    db_config = resolve_db_config_fn("vector")
+                except Exception:
+                    db_config = None
                 if db_config and db_config.type in ("postgresql", "postgres"):
                     backend_cls = get_vector_backend("pgvector")
                     if backend_cls is None:
-                        return LanceBackend(db_path)
+                        return build_lance_backend()
                     connection_string = _build_pg_connection_string(db_config)
                     schema = db_config.schema or "public"
+                    namespace = getattr(agent_config, "current_namespace", "")
                     return backend_cls(
                         db_path=db_path,
                         connection_string=connection_string,
                         schema=schema,
-                        namespace=agent_config.current_namespace,
+                        namespace=namespace,
                     )
-    return LanceBackend(db_path)
+    return build_lance_backend()

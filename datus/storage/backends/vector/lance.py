@@ -32,27 +32,7 @@ class LanceFilterCompiler(FilterCompiler):
         try:
             from datus.storage import lancedb_conditions as lc
 
-            # If already a LanceDB condition node, use build_where directly.
-            if isinstance(expr, (lc.Condition, lc.And, lc.Or, lc.Not)):
-                return lc.build_where(expr)
-
-            # Convert generic FilterExpr nodes into LanceDB nodes.
-            def to_lance(node: FilterExpr):
-                if isinstance(node, (lc.Condition, lc.And, lc.Or, lc.Not)):
-                    return node
-                from datus.storage.backends import interfaces as base
-
-                if isinstance(node, base.Condition):
-                    return lc.Condition(node.field, lc.Op(node.op.value), node.value)
-                if isinstance(node, base.And):
-                    return lc.And([to_lance(n) for n in node.nodes])
-                if isinstance(node, base.Or):
-                    return lc.Or([to_lance(n) for n in node.nodes])
-                if isinstance(node, base.Not):
-                    return lc.Not(to_lance(node.node))
-                return node
-
-            return lc.build_where(to_lance(expr))
+            return lc.build_where(expr)
         except Exception as exc:
             logger.warning(f"Failed to compile filter expression for LanceDB: {exc}")
             return None
@@ -215,7 +195,7 @@ class LanceTable(VectorTable):
         query_builder = self._table.search(
             query=text,
             query_type="hybrid",
-            vector_column_name=self._spec.text_source or self._spec.vector_column,
+            vector_column_name=self._spec.vector_column,
         )
         query_builder = self._fill_query(query_builder, select, where_clause)
         if reranker:

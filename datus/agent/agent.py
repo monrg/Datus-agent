@@ -477,12 +477,14 @@ class Agent:
 
             elif component == "semantic_model":
                 if kb_update_strategy == "overwrite":
-                    storage_manager.reset_component(
-                        "semantic_model", kb_update_strategy, namespace=self.global_config.current_namespace
-                    )
+                    from_adapter = hasattr(self.args, "from_adapter") and self.args.from_adapter
+                    if not from_adapter:
+                        storage_manager.reset_component(
+                            "semantic_model", kb_update_strategy, namespace=self.global_config.current_namespace
+                        )
                     # Only clear semantic_models/{namespace} directory when NOT using --from_adapter
                     # because MetricFlow adapter needs to read YAML files from this directory
-                    if not (hasattr(self.args, "from_adapter") and self.args.from_adapter):
+                    if not from_adapter:
                         path_manager = get_path_manager(datus_home=self.global_config.home)
                         semantic_yaml_dir = path_manager.semantic_model_path(self.global_config.current_namespace)
                         force = self._force_delete
@@ -527,12 +529,14 @@ class Agent:
 
             elif component == "metrics":
                 if kb_update_strategy == "overwrite":
-                    storage_manager.reset_component(
-                        "metrics", kb_update_strategy, namespace=self.global_config.current_namespace
-                    )
+                    from_adapter = hasattr(self.args, "from_adapter") and self.args.from_adapter
+                    if not from_adapter:
+                        storage_manager.reset_component(
+                            "metrics", kb_update_strategy, namespace=self.global_config.current_namespace
+                        )
                     # Only clear semantic_models/{namespace} directory when NOT using --from_adapter
                     # because MetricFlow adapter needs to read YAML files from this directory
-                    if not (hasattr(self.args, "from_adapter") and self.args.from_adapter):
+                    if not from_adapter:
                         path_manager = get_path_manager(datus_home=self.global_config.home)
                         semantic_yaml_dir = path_manager.semantic_model_path(self.global_config.current_namespace)
                         force = self._force_delete

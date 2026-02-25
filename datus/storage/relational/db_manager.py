@@ -69,7 +69,7 @@ class DBManager:
                 except Exception:
                     logger.warning("Failed to rollback transaction after error.")
             raise DatusException(
-                ErrorCode.TOOL_STORE_FAILED,
+                ErrorCode.DB_CONNECTION_FAILED,
                 message=f"Database connection error ({self.backend.name}): {str(exc)}",
             ) from exc
         finally:

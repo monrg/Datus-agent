@@ -35,10 +35,19 @@ class SQLiteTransaction:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        if exc_type is not None:
-            self.rollback()
-        elif not self._committed and not self._rolled_back:
-            self.commit()
+        try:
+            if exc_type is not None:
+                self.rollback()
+            elif not self._committed and not self._rolled_back:
+                self.commit()
+        finally:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception as exc:
+                    logger.warning(f"Failed to close SQLite transaction connection: {exc}")
+                finally:
+                    self._conn = None
 
     def commit(self) -> None:
         """Commit the transaction."""
@@ -130,8 +139,6 @@ class SQLiteTable:
     ) -> int:
         """Insert or update on conflict.
 
-        Uses INSERT OR REPLACE for SQLite.
-
         Args:
             row: Column-value mapping
             conflict_columns: Columns that define uniqueness (used for conflict detection)
@@ -143,8 +150,27 @@ class SQLiteTable:
         values = [row[c] for c in columns]
         placeholders = ", ".join(["?"] * len(columns))
         column_list = ", ".join(columns)
+        if not conflict_columns:
+            sql = f"INSERT INTO {self._name} ({column_list}) VALUES ({placeholders})"
+        else:
+            conflict_cols = list(conflict_columns)
+            missing_conflict_cols = [col for col in conflict_cols if col not in row]
+            if missing_conflict_cols:
+                raise ValueError(f"Missing conflict columns in row: {', '.join(missing_conflict_cols)}")
 
-        sql = f"INSERT OR REPLACE INTO {self._name} ({column_list}) VALUES ({placeholders})"
+            conflict_clause = ", ".join(conflict_cols)
+            update_cols = [col for col in columns if col not in conflict_cols]
+            if update_cols:
+                assignments = ", ".join([f"{col} = excluded.{col}" for col in update_cols])
+                sql = (
+                    f"INSERT INTO {self._name} ({column_list}) VALUES ({placeholders}) "
+                    f"ON CONFLICT ({conflict_clause}) DO UPDATE SET {assignments}"
+                )
+            else:
+                sql = (
+                    f"INSERT INTO {self._name} ({column_list}) VALUES ({placeholders}) "
+                    f"ON CONFLICT ({conflict_clause}) DO NOTHING"
+                )
 
         with self._backend._get_connection() as conn:
             cursor = conn.cursor()

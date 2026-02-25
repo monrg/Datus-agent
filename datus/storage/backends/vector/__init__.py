@@ -15,18 +15,22 @@ from .interfaces import (
     VectorBackend,
     VectorTable,
 )
-from .lance import LanceBackend
 from .registry import register_vector_backend
 
-register_vector_backend("lancedb", LanceBackend)
+LanceBackend = None
+try:
+    from .lance import LanceBackend  # type: ignore[assignment]
+except ImportError:
+    LanceBackend = None
+else:
+    register_vector_backend("lancedb", LanceBackend)
 
 __all__ = [
-    # Vector backend types
     "And",
     "BackendCapabilities",
     "Condition",
-    "FilterExpr",
     "FilterCompiler",
+    "FilterExpr",
     "Not",
     "Op",
     "Or",
@@ -34,5 +38,8 @@ __all__ = [
     "VectorBackend",
     "VectorTable",
     "register_vector_backend",
-    "LanceBackend",
 ]
+
+if LanceBackend is not None:
+    __all__.append("LanceBackend")
+    __all__.sort()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import Column, MetaData, Table
@@ -28,7 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ClauseElement
 from sqlalchemy.sql.schema import Index, UniqueConstraint
-from sqlalchemy.types import Boolean, Date, DateTime, Float, Integer, LargeBinary, String, Text
+from sqlalchemy.types import BigInteger, Boolean, Date, DateTime, Float, Integer, LargeBinary, SmallInteger, String, Text
 
 from datus.storage.backends.relational.interfaces import (
     ColumnSpec,
@@ -47,6 +48,13 @@ from datus.utils.loggings import get_logger
 from .sqlalchemy_connector import SQLAlchemyConnector
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class UnsafeRawSQL:
+    """Explicit wrapper for executing raw SQL filters."""
+
+    sql: str
 
 
 class SQLAlchemyTransaction:
@@ -69,16 +77,26 @@ class SQLAlchemyTransaction:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        if exc_type is not None:
-            self.rollback()
-        elif not self._committed and not self._rolled_back:
-            self.commit()
-
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                logger.warning("Failed to close SQLAlchemy connection")
+        try:
+            if exc_type is not None:
+                try:
+                    self.rollback()
+                except Exception as rollback_exc:
+                    logger.warning(f"Failed to rollback transaction: {rollback_exc}")
+            elif not self._committed and not self._rolled_back:
+                try:
+                    self.commit()
+                except Exception as commit_exc:
+                    logger.warning(f"Failed to commit transaction: {commit_exc}")
+        finally:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    logger.warning("Failed to close SQLAlchemy connection")
+                finally:
+                    self._conn = None
+                    self._txn = None
 
     def commit(self) -> None:
         if self._txn is not None and not self._committed and not self._rolled_back:
@@ -241,7 +259,7 @@ class SQLAlchemyBackend(RelationalBackend):
         self._metadata = MetaData()
         self._tables: Dict[str, SQLAlchemyTable] = {}
 
-        logger.debug(f"SQLAlchemyBackend initialized with {self._connection_string}")
+        logger.debug(f"SQLAlchemyBackend initialized (dialect={self._connector.dialect_name})")
 
     @property
     def name(self) -> str:
@@ -276,11 +294,19 @@ class SQLAlchemyBackend(RelationalBackend):
             return table_handle
 
     def drop_table(self, name: str) -> None:
-        table = Table(name, self._metadata)
+        table = self._metadata.tables.get(name)
+        if table is None:
+            table = Table(name, self._metadata)
         try:
             table.drop(self._connector.engine, checkfirst=True)
         except Exception as exc:
             raise self._connector.handle_exception(exc, operation="drop table") from exc
+
+        with self._lock:
+            self._tables.pop(name, None)
+            metadata_table = self._metadata.tables.get(name)
+            if metadata_table is not None:
+                self._metadata.remove(metadata_table)
 
     def table_exists(self, name: str) -> bool:
         inspector = inspect(self._connector.engine)
@@ -362,7 +388,10 @@ class SQLAlchemyBackend(RelationalBackend):
         try:
             with self._connector.begin() as conn:
                 result = conn.execute(stmt, list(rows))
-                return int(result.rowcount or len(rows))
+                rowcount = result.rowcount
+                if rowcount is None:
+                    return len(rows)
+                return int(rowcount)
         except Exception as exc:
             raise self._connector.handle_exception(exc, sql=str(stmt), operation="bulk insert") from exc
 
@@ -501,8 +530,12 @@ class SQLAlchemyBackend(RelationalBackend):
             return String(length) if length else String()
         if dtype in {"TEXT", "STRING"}:
             return Text()
-        if dtype in {"INTEGER", "INT", "BIGINT", "SMALLINT"}:
+        if dtype in {"INTEGER", "INT"}:
             return Integer()
+        if dtype == "BIGINT":
+            return BigInteger()
+        if dtype == "SMALLINT":
+            return SmallInteger()
         if dtype in {"REAL", "FLOAT", "DOUBLE"}:
             return Float()
         if dtype in {"BLOB", "BINARY"}:
@@ -542,9 +575,14 @@ class SQLAlchemyBackend(RelationalBackend):
             return None
         if isinstance(expr, ClauseElement):
             return expr
+        if isinstance(expr, UnsafeRawSQL):
+            stripped = expr.sql.strip()
+            return text(stripped) if stripped else None
         if isinstance(expr, str):
             stripped = expr.strip()
-            return text(stripped) if stripped else None
+            if not stripped:
+                return None
+            raise ValueError("Raw string filters are not allowed. Use condition nodes or UnsafeRawSQL.")
         return self._compile_node(expr, table)
 
     def _compile_node(self, node: Any, table: Table) -> ClauseElement:

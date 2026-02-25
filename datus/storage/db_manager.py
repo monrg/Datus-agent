@@ -11,7 +11,7 @@ abstracting away the specific backend implementation (SQLite, PostgreSQL, etc.).
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 from datus.storage.backends.relational.interfaces import (
     RelationalBackend,
@@ -59,8 +59,25 @@ class DBManager:
     """
 
     # Class-level registry for shared instances
-    _instances: Dict[str, "DBManager"] = {}
+    _instances: Dict[Tuple[Any, ...], "DBManager"] = {}
     _lock = threading.Lock()
+
+    @classmethod
+    def _backend_config_key(cls, backend_config: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
+        def freeze(value: Any) -> Any:
+            if isinstance(value, dict):
+                return tuple(sorted((str(k), freeze(v)) for k, v in value.items()))
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(v) for v in value)
+            if isinstance(value, (set, frozenset)):
+                return tuple(sorted(freeze(v) for v in value))
+            try:
+                hash(value)
+                return value
+            except TypeError:
+                return repr(value)
+
+        return tuple(sorted((str(k), freeze(v)) for k, v in backend_config.items()))
 
     def __init__(
         self,
@@ -120,7 +137,8 @@ class DBManager:
             DBManager instance
         """
         # Create a unique key for this database
-        key = f"{db_path}:{db_name}:{backend_type}"
+        config_key = cls._backend_config_key(backend_config)
+        key = (db_path, db_name, backend_type, config_key)
 
         with cls._lock:
             if key not in cls._instances:

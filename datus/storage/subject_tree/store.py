@@ -111,6 +111,10 @@ class SubjectTreeStore:
             parent = self.get_node(parent_id)
             if not parent:
                 raise ValueError(f"Parent node {parent_id} not found")
+        else:
+            existing_root = self._find_child_by_name(None, name)
+            if existing_root:
+                raise ValueError(f"Node with name '{name}' already exists at root level")
 
         # Create node
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -238,6 +242,13 @@ class SubjectTreeStore:
 
             # Update parent
             update_values["parent_id"] = parent_id
+
+        effective_parent_id = update_values.get("parent_id", node["parent_id"])
+        effective_name = update_values.get("name", node["name"])
+        if (("name" in update_values) or ("parent_id" in update_values)) and effective_parent_id is None:
+            existing_root = self._find_child_by_name(None, effective_name)
+            if existing_root and existing_root.get("node_id") != node_id:
+                raise ValueError(f"Node with name '{effective_name}' already exists at root level")
 
         if not update_values:
             logger.debug(f"No fields to update for node {node_id}")
@@ -1032,7 +1043,7 @@ class BaseSubjectEmbeddingStore(BaseEmbeddingStore):
 
         # Build where clause to find the storage entry
         self._ensure_table_ready()
-        from datus.storage.lancedb_conditions import and_, build_where, eq
+        from datus.storage.lancedb_conditions import and_, eq
 
         where_condition = and_(eq(SUBJECT_ID_COLUMN_NAME, old_subject_node_id), eq("name", old_name))
 
@@ -1040,8 +1051,7 @@ class BaseSubjectEmbeddingStore(BaseEmbeddingStore):
         if name_changed and parent_changed:
             # Check if target (new_subject_node_id + new_name) already exists
             conflict_condition = and_(eq(SUBJECT_ID_COLUMN_NAME, new_subject_node_id), eq("name", new_name))
-            conflict_where = build_where(conflict_condition)
-            existing_count = self.table.count_rows(conflict_where)
+            existing_count = self.table.count(conflict_condition)
             if existing_count > 0:
                 raise ValueError(
                     f"Storage entry with name '{new_name}' already exists "
@@ -1125,13 +1135,12 @@ class BaseSubjectEmbeddingStore(BaseEmbeddingStore):
 
         # Build where clause to locate the entry
         self._ensure_table_ready()
-        from datus.storage.lancedb_conditions import and_, build_where, eq
+        from datus.storage.lancedb_conditions import and_, eq
 
         where_condition = and_(eq(SUBJECT_ID_COLUMN_NAME, subject_node_id), eq(NAME_COLUMN_NAME, name.strip()))
 
         # Check if entry exists
-        where_clause = build_where(where_condition)
-        count = self.table.count_rows(where_clause)
+        count = self.table.count(where_condition)
         if count == 0:
             raise ValueError(f"Entry not found: name='{name}' under subject_path={'/'.join(subject_path)}")
 
@@ -1246,19 +1255,18 @@ class BaseSubjectEmbeddingStore(BaseEmbeddingStore):
 
         # Build where clause to locate the entry
         self._ensure_table_ready()
-        from datus.storage.lancedb_conditions import and_, build_where, eq
+        from datus.storage.lancedb_conditions import and_, eq
 
         where_condition = and_(eq(SUBJECT_ID_COLUMN_NAME, subject_node_id), eq(NAME_COLUMN_NAME, name))
 
         # Check if entry exists
-        where_clause = build_where(where_condition)
-        count = self.table.count_rows(where_clause)
+        count = self.table.count(where_condition)
         if count == 0:
             logger.warning(f"Entry not found: name='{name}' under subject_path={'/'.join(subject_path)}")
             return False
 
         # Delete the entry
-        self.table.delete(where_clause)
+        self.table.delete(where_condition)
 
         logger.info(f"Deleted entry '{name}' under subject_path={'/'.join(subject_path)}")
 

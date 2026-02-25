@@ -121,11 +121,30 @@ agent:
       username: ${STARROCKS_USER}
       password: ${STARROCKS_PASSWORD}
       database: ${STARROCKS_DATABASE}
+    # Example for PostgreSQL namespace used by pluggable storage backends (pgvector via plugin)
+    gpdb_test:
+      type: postgresql
+      host: ${POSTGRES_HOST}
+      port: 5432
+      database: ${POSTGRES_DB}
+      username: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+      schema: public
+      sslmode: prefer
+      enable_vector_search: true
 
   storage:
     # Data path is now fixed at {agent.home}/data
     # Final storage paths: {home}/data/datus_db_{namespace}, {home}/data/sub_agents/{agent_name}, etc.
     embedding_device_type: cpu # If set to cpu, it will be specified as cpu, otherwise, it will be automatically selected based on the current machine
+    # Optional: route relational/vector storage to a configured namespace
+    backends:
+      namespace: gpdb_test
+      # Optional per-kind override:
+      # relational:
+      #   namespace: gpdb_test
+      # vector:
+      #   namespace: gpdb_test
     # Local model suggestions:
     # 1. if you want extreme performance, choose the small multilingual model with 384 dimensions: all-MiniLM-L6-v2 (~100M) or intfloat/multilingual-e5-small (~460M).
     # 2. if you want performance and retrieval quality, choose the 1024-dimension multilingual model: intfloat/multilingual-e5-large-instruct (~1.2G)
