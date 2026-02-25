@@ -29,7 +29,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ClauseElement
 from sqlalchemy.sql.schema import Index, UniqueConstraint
-from sqlalchemy.types import BigInteger, Boolean, Date, DateTime, Float, Integer, LargeBinary, SmallInteger, String, Text
+from sqlalchemy.types import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    SmallInteger,
+    String,
+    Text,
+)
 
 from datus.storage.backends.relational.interfaces import (
     ColumnSpec,
