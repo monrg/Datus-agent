@@ -9,10 +9,12 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, Union
 
 import pyarrow as pa
 
-from datus.storage.lancedb_conditions import And, Condition, Not, Or
+from datus.storage.lancedb_conditions import And, Condition, Not, Op, Or
 
 # Reuse the canonical condition AST in lancedb_conditions to avoid duplicate classes.
 FilterExpr = Union[Condition, And, Or, Not, str, Any]
+# Keep public compatibility for imports from datus.storage.backends.vector.
+FilterOp = Op
 
 
 class FilterCompiler(Protocol):
