@@ -9,8 +9,7 @@ from typing import Any, Mapping, Optional, Protocol, Sequence, Union
 
 import pyarrow as pa
 
-from datus.storage.lancedb_conditions import And, Condition, Not, Op, Or
-
+from datus.storage.lancedb_conditions import And, Condition, Not, Or
 
 # Reuse the canonical condition AST in lancedb_conditions to avoid duplicate classes.
 FilterExpr = Union[Condition, And, Or, Not, str, Any]
